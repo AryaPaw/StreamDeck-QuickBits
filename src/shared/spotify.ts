@@ -47,7 +47,6 @@ type SetupCallback = (clientId: string, clientSecret: string) => Promise<void>;
 
 class SpotifyAuth {
 	private server: ReturnType<typeof createServer> | null = null;
-	private authCode: string | null = null;
 	private pendingSettings: SpotifySettings | null = null;
 	private settingsCallback: ((settings: SpotifySettings) => void) | null = null;
 
@@ -78,7 +77,7 @@ class SpotifyAuth {
 			// Handle form submission
 			if (url.pathname === "/submit" && req.method === "POST") {
 				let body = "";
-				req.on("data", chunk => body += chunk);
+				req.on("data", (chunk: Buffer) => body += chunk.toString());
 				req.on("end", async () => {
 					try {
 						const { clientId, clientSecret } = JSON.parse(body);
@@ -114,10 +113,11 @@ class SpotifyAuth {
 				const error = url.searchParams.get("error");
 
 				if (code && this.pendingSettings) {
-					this.authCode = code;
-					console.log("[Spotify] Exchanging code for token...");
+					streamDeck.logger.info("[Spotify] Exchanging code for token...");
 					const newSettings = await this.exchangeCodeForToken(this.pendingSettings, code);
-					console.log("[Spotify] Token exchange result:", newSettings.refreshToken ? "success" : "failed");
+					streamDeck.logger.info(
+						`[Spotify] Token exchange result: ${newSettings.refreshToken ? "success" : "failed"}`
+					);
 
 					if (newSettings.refreshToken) {
 						this.settingsCallback?.(newSettings);
@@ -165,91 +165,9 @@ class SpotifyAuth {
 		this.server = null;
 	}
 
-	async startAuthFlow(settings: SpotifySettings): Promise<boolean> {
-		if (!settings.clientId) return false;
-
-		const authUrl = new URL("https://accounts.spotify.com/authorize");
-		authUrl.searchParams.set("client_id", settings.clientId);
-		authUrl.searchParams.set("response_type", "code");
-		authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-		authUrl.searchParams.set("scope", SCOPES);
-
-		try {
-			await execAsync(`start "" "${authUrl.toString()}"`);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	async waitForCallback(settings: SpotifySettings): Promise<SpotifySettings> {
-		return new Promise((resolve) => {
-			this.authCode = null;
-
-			this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
-				const url = new URL(req.url || "/", `http://127.0.0.1:5789`);
-
-				if (url.pathname === "/callback") {
-					const code = url.searchParams.get("code");
-					const error = url.searchParams.get("error");
-
-					if (code) {
-						this.authCode = code;
-						res.writeHead(200, { "Content-Type": "text/html" });
-						res.end(`
-							<html>
-							<body style="background:#1a1a2e;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-								<div style="text-align:center">
-									<h1 style="color:#1DB954">✓ Connected to Spotify!</h1>
-									<p>You can close this window.</p>
-								</div>
-							</body>
-							</html>
-						`);
-					} else {
-						res.writeHead(400, { "Content-Type": "text/html" });
-						res.end(`
-							<html>
-							<body style="background:#1a1a2e;color:#fff;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-								<div style="text-align:center">
-									<h1 style="color:#ff5252">✗ Authorization Failed</h1>
-									<p>${error || "Unknown error"}</p>
-								</div>
-							</body>
-							</html>
-						`);
-					}
-
-					setTimeout(() => {
-						this.server?.close();
-						this.server = null;
-					}, 1000);
-				}
-			});
-
-			this.server.listen(5789);
-
-			const timeout = setTimeout(() => {
-				this.server?.close();
-				this.server = null;
-				resolve(settings);
-			}, 120000);
-
-			const checkInterval = setInterval(async () => {
-				if (this.authCode) {
-					clearInterval(checkInterval);
-					clearTimeout(timeout);
-
-					const newSettings = await this.exchangeCodeForToken(settings, this.authCode);
-					resolve(newSettings);
-				}
-			}, 500);
-		});
-	}
-
 	private async exchangeCodeForToken(settings: SpotifySettings, code: string): Promise<SpotifySettings> {
 		try {
-			console.log("[Spotify] Exchanging code, clientId:", settings.clientId?.substring(0, 8) + "...");
+			streamDeck.logger.info(`[Spotify] Exchanging code, clientId: ${settings.clientId?.substring(0, 8)}...`);
 			const response = await fetch("https://accounts.spotify.com/api/token", {
 				method: "POST",
 				headers: {
@@ -265,7 +183,7 @@ class SpotifyAuth {
 
 			if (!response.ok) {
 				const errorText = await response.text();
-				console.log("[Spotify] Token exchange failed:", response.status, errorText);
+				streamDeck.logger.error(`[Spotify] Token exchange failed: ${response.status} ${errorText}`);
 				return settings;
 			}
 
@@ -309,18 +227,28 @@ class SpotifyAuth {
 			const data = await response.json() as {
 				access_token: string;
 				expires_in: number;
+				refresh_token?: string;
 			};
 
 			settings.accessToken = data.access_token;
 			settings.tokenExpiry = Date.now() + data.expires_in * 1000;
+			if (data.refresh_token) {
+				settings.refreshToken = data.refresh_token;
+			}
+			await saveSpotifySettings(settings);
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
-	async ensureAccessToken(settings: SpotifySettings): Promise<string | null> {
-		if (!settings.accessToken || !settings.tokenExpiry || Date.now() >= settings.tokenExpiry - 60000) {
+	async ensureAccessToken(settings: SpotifySettings, forceRefresh = false): Promise<string | null> {
+		const needRefresh =
+			forceRefresh ||
+			!settings.accessToken ||
+			!settings.tokenExpiry ||
+			Date.now() >= settings.tokenExpiry - 60000;
+		if (needRefresh) {
 			const success = await this.refreshAccessToken(settings);
 			if (!success) return null;
 		}
@@ -330,172 +258,250 @@ class SpotifyAuth {
 
 export const spotifyAuth = new SpotifyAuth();
 
+type SpotifyPlayingItem = {
+	type?: string;
+	id: string;
+	uri: string;
+	name: string;
+	duration_ms: number;
+	artists?: { name: string }[];
+	album?: { name: string; images?: { url: string }[] };
+	show?: { name: string; publisher?: string; images?: { url: string }[] };
+};
+
+function mapPlayingItemToTrack(
+	item: SpotifyPlayingItem,
+	isPlaying: boolean,
+	progressMs: number
+): SpotifyTrack | null {
+	const isEpisode =
+		item.type === "episode" || (typeof item.uri === "string" && item.uri.startsWith("spotify:episode:"));
+
+	if (isEpisode) {
+		const show = item.show;
+		return {
+			id: item.id,
+			uri: item.uri,
+			name: item.name,
+			artist: show?.publisher || show?.name || "Podcast",
+			album: show?.name || "",
+			albumArt: show?.images?.[0]?.url,
+			isPlaying,
+			progress: progressMs,
+			duration: item.duration_ms
+		};
+	}
+
+	const album = item.album;
+	if (!album?.name) {
+		return null;
+	}
+
+	const artists = item.artists;
+	return {
+		id: item.id,
+		uri: item.uri,
+		name: item.name,
+		artist: artists?.length ? artists.map((a) => a.name).join(", ") : "Unknown",
+		album: album.name,
+		albumArt: album.images?.[0]?.url,
+		isPlaying,
+		progress: progressMs,
+		duration: item.duration_ms
+	};
+}
+
 export class SpotifyAPI {
-	async getCurrentTrack(settings: SpotifySettings): Promise<SpotifyTrack | null> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) return null;
+	private static readonly PLAYBACK_QUERY = "additional_types=track,episode";
+	private last429WarnAt = 0;
+
+	private playbackUrl(path: string): string {
+		const sep = path.includes("?") ? "&" : "?";
+		return `https://api.spotify.com/v1/me/player${path}${sep}${SpotifyAPI.PLAYBACK_QUERY}`;
+	}
+
+	private warn429(scope: string, response: Response): void {
+		const now = Date.now();
+		if (now - this.last429WarnAt < 10_000) {
+			return;
+		}
+		this.last429WarnAt = now;
+		const retryAfter = response.headers.get("Retry-After");
+		streamDeck.logger.warn(
+			`[Spotify] ${scope}: rate limited (429)${retryAfter ? `, Retry-After=${retryAfter}s` : ""}`
+		);
+	}
+
+	private async requestWithAuth(
+		settings: SpotifySettings,
+		url: string,
+		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> }
+	): Promise<Response | null> {
+		let token = await spotifyAuth.ensureAccessToken(settings);
+		if (!token) {
+			return null;
+		}
+
+		const doFetch = (authToken: string) => {
+			const headers = { ...(init?.headers ?? {}), Authorization: `Bearer ${authToken}` };
+			return fetch(url, { ...init, headers });
+		};
 
 		try {
-			const response = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
-				headers: { "Authorization": `Bearer ${token}` }
-			});
+			let response = await doFetch(token);
+			if (response.status === 401) {
+				token = await spotifyAuth.ensureAccessToken(settings, true);
+				if (!token) return null;
+				response = await doFetch(token);
+			}
+			return response;
+		} catch (e) {
+			streamDeck.logger.error(`[Spotify] request failed: ${url} ${e}`);
+			return null;
+		}
+	}
 
-			if (response.status === 204) return null;
-			if (!response.ok) return null;
+	private async isSavedUri(settings: SpotifySettings, uri: string): Promise<boolean> {
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`
+		);
+		if (!response) return false;
+		if (response.status === 429) {
+			this.warn429("isSaved", response);
+			return false;
+		}
+		if (!response.ok) {
+			streamDeck.logger.error(
+				`[Spotify] isSaved failed: ${response.status} ${await response.text()}`
+			);
+			return false;
+		}
+		const data = (await response.json()) as boolean[];
+		return data[0] || false;
+	}
 
-			const data = await response.json() as SpotifyCurrentlyPlaying;
+	private async setSavedUri(settings: SpotifySettings, uri: string, method: "PUT" | "DELETE"): Promise<boolean> {
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(uri)}`,
+			{ method }
+		);
+		if (!response) return false;
+		if (response.status === 429) {
+			this.warn429("setSaved", response);
+			return false;
+		}
+		if (!response.ok) {
+			streamDeck.logger.error(
+				`[Spotify] ${method === "PUT" ? "save" : "remove"} failed: ${response.status} ${await response.text()}`
+			);
+		}
+		return response.ok;
+	}
+
+	async getCurrentTrack(settings: SpotifySettings): Promise<SpotifyTrack | null> {
+		const response = await this.requestWithAuth(settings, this.playbackUrl(""));
+		if (!response) {
+			streamDeck.logger.error("[Spotify] getCurrentTrack: no token or request failed");
+			return null;
+		}
+		if (response.status === 429) {
+			this.warn429("getCurrentTrack", response);
+			return null;
+		}
+		if (response.status === 204) return null;
+		if (!response.ok) {
+			streamDeck.logger.warn(`[Spotify] getCurrentTrack failed: ${response.status}`);
+			return null;
+		}
+
+		try {
+			const data = (await response.json()) as SpotifyCurrentlyPlaying;
 			if (!data.item) return null;
-
-			return {
-				id: data.item.id,
-				uri: data.item.uri,
-				name: data.item.name,
-				artist: data.item.artists.map(a => a.name).join(", "),
-				album: data.item.album.name,
-				albumArt: data.item.album.images[0]?.url,
-				isPlaying: data.is_playing,
-				progress: data.progress_ms,
-				duration: data.item.duration_ms
-			};
-		} catch {
+			return mapPlayingItemToTrack(data.item, data.is_playing, data.progress_ms ?? 0);
+		} catch (e) {
+			streamDeck.logger.error("[Spotify] getCurrentTrack parse error: " + e);
 			return null;
 		}
 	}
 
 	async isTrackSaved(settings: SpotifySettings, trackUri: string): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) {
-			streamDeck.logger.error("[Spotify] isTrackSaved: no token");
-			return false;
-		}
+		return this.isSavedUri(settings, trackUri);
+	}
 
-		try {
-			const response = await fetch(`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(trackUri)}`, {
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-
-			if (!response.ok) {
-				streamDeck.logger.error("[Spotify] isTrackSaved failed: " + response.status);
-				return false;
-			}
-			const data = await response.json() as boolean[];
-			return data[0] || false;
-		} catch (e) {
-			streamDeck.logger.error("[Spotify] isTrackSaved error: " + e);
-			return false;
-		}
+	async isEpisodeSaved(settings: SpotifySettings, episodeId: string): Promise<boolean> {
+		return this.isSavedUri(settings, `spotify:episode:${episodeId}`);
 	}
 
 	async saveTrack(settings: SpotifySettings, trackUri: string): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) {
-			streamDeck.logger.error("[Spotify] saveTrack: no token");
-			return false;
-		}
-
-		try {
-			const response = await fetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(trackUri)}`, {
-				method: "PUT",
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-			if (!response.ok) {
-				streamDeck.logger.error("[Spotify] saveTrack failed: " + response.status + " " + await response.text());
-			}
-			return response.ok;
-		} catch (e) {
-			streamDeck.logger.error("[Spotify] saveTrack error: " + e);
-			return false;
-		}
+		return this.setSavedUri(settings, trackUri, "PUT");
 	}
 
 	async removeTrack(settings: SpotifySettings, trackUri: string): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) {
-			streamDeck.logger.error("[Spotify] removeTrack: no token");
-			return false;
-		}
+		return this.setSavedUri(settings, trackUri, "DELETE");
+	}
 
-		try {
-			const response = await fetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(trackUri)}`, {
-				method: "DELETE",
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-			if (!response.ok) {
-				streamDeck.logger.error("[Spotify] removeTrack failed: " + response.status + " " + await response.text());
-			}
-			return response.ok;
-		} catch (e) {
-			streamDeck.logger.error("[Spotify] removeTrack error: " + e);
-			return false;
-		}
+	async saveEpisode(settings: SpotifySettings, episodeId: string): Promise<boolean> {
+		return this.setSavedUri(settings, `spotify:episode:${episodeId}`, "PUT");
+	}
+
+	async removeEpisode(settings: SpotifySettings, episodeId: string): Promise<boolean> {
+		return this.setSavedUri(settings, `spotify:episode:${episodeId}`, "DELETE");
 	}
 
 	async toggleLike(settings: SpotifySettings): Promise<{ success: boolean; isLiked: boolean }> {
 		const track = await this.getCurrentTrack(settings);
 		if (!track) {
-			streamDeck.logger.error("[Spotify] toggleLike: no track");
+			streamDeck.logger.error("[Spotify] toggleLike: no current item");
+			return { success: false, isLiked: false };
+		}
+		if (track.uri.startsWith("spotify:local:")) {
+			streamDeck.logger.warn("[Spotify] toggleLike: local files cannot be liked via API");
 			return { success: false, isLiked: false };
 		}
 
-		const isCurrentlyLiked = await this.isTrackSaved(settings, track.uri);
+		const isEpisode = track.uri.startsWith("spotify:episode:");
+		const isCurrentlyLiked = isEpisode
+			? await this.isEpisodeSaved(settings, track.id)
+			: await this.isTrackSaved(settings, track.uri);
 
 		if (isCurrentlyLiked) {
-			const success = await this.removeTrack(settings, track.uri);
+			const success = isEpisode
+				? await this.removeEpisode(settings, track.id)
+				: await this.removeTrack(settings, track.uri);
 			return { success, isLiked: false };
-		} else {
-			const success = await this.saveTrack(settings, track.uri);
-			return { success, isLiked: true };
 		}
+		const success = isEpisode
+			? await this.saveEpisode(settings, track.id)
+			: await this.saveTrack(settings, track.uri);
+		return { success, isLiked: true };
+	}
+
+	private async playerMethod(settings: SpotifySettings, url: string, method: "PUT" | "POST"): Promise<boolean> {
+		const response = await this.requestWithAuth(settings, url, { method });
+		if (!response) return false;
+		if (response.status === 429) {
+			this.warn429("player", response);
+			return false;
+		}
+		return response.ok || response.status === 204;
 	}
 
 	async playPause(settings: SpotifySettings): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) return false;
-
 		const track = await this.getCurrentTrack(settings);
 		const endpoint = track?.isPlaying
 			? "https://api.spotify.com/v1/me/player/pause"
 			: "https://api.spotify.com/v1/me/player/play";
-
-		try {
-			const response = await fetch(endpoint, {
-				method: "PUT",
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-			return response.ok || response.status === 204;
-		} catch {
-			return false;
-		}
+		return this.playerMethod(settings, endpoint, "PUT");
 	}
 
 	async nextTrack(settings: SpotifySettings): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) return false;
-
-		try {
-			const response = await fetch("https://api.spotify.com/v1/me/player/next", {
-				method: "POST",
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-			return response.ok || response.status === 204;
-		} catch {
-			return false;
-		}
+		return this.playerMethod(settings, "https://api.spotify.com/v1/me/player/next", "POST");
 	}
 
 	async previousTrack(settings: SpotifySettings): Promise<boolean> {
-		const token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) return false;
-
-		try {
-			const response = await fetch("https://api.spotify.com/v1/me/player/previous", {
-				method: "POST",
-				headers: { "Authorization": `Bearer ${token}` }
-			});
-			return response.ok || response.status === 204;
-		} catch {
-			return false;
-		}
+		return this.playerMethod(settings, "https://api.spotify.com/v1/me/player/previous", "POST");
 	}
 }
 
@@ -518,7 +524,7 @@ class SpotifyState {
 	start(): void {
 		if (this.pollInterval) return;
 		this.poll();
-		this.pollInterval = setInterval(() => this.poll(), 500);
+		this.pollInterval = setInterval(() => this.poll(), 3000);
 	}
 
 	stop(): void {
@@ -558,12 +564,16 @@ class SpotifyState {
 
 		const track = await spotifyAPI.getCurrentTrack(settings);
 
-		let isLiked = this.currentState.isLiked;
+		let isLiked = false;
 
 		// Only check liked status if track changed or first poll
 		if (track && (track.id !== this.lastTrackId || this.lastTrackId === null)) {
-			isLiked = await spotifyAPI.isTrackSaved(settings, track.uri);
+			isLiked = track.uri.startsWith("spotify:episode:")
+				? await spotifyAPI.isEpisodeSaved(settings, track.id)
+				: await spotifyAPI.isTrackSaved(settings, track.uri);
 			this.lastTrackId = track.id;
+		} else if (!track) {
+			this.lastTrackId = null;
 		}
 
 		const newState: SpotifyPlaybackState = { track, isLiked };
@@ -583,7 +593,10 @@ class SpotifyState {
 		const settings = getSpotifySettings();
 		if (!this.currentState.track) return;
 
-		const isLiked = await spotifyAPI.isTrackSaved(settings, this.currentState.track.uri);
+		const t = this.currentState.track;
+		const isLiked = t.uri.startsWith("spotify:episode:")
+			? await spotifyAPI.isEpisodeSaved(settings, t.id)
+			: await spotifyAPI.isTrackSaved(settings, t.uri);
 		if (isLiked !== this.currentState.isLiked) {
 			this.currentState = { ...this.currentState, isLiked };
 			this.emit(this.currentState);
@@ -612,15 +625,5 @@ export type SpotifyTrack = {
 type SpotifyCurrentlyPlaying = {
 	is_playing: boolean;
 	progress_ms: number;
-	item: {
-		id: string;
-		uri: string;
-		name: string;
-		duration_ms: number;
-		artists: { name: string }[];
-		album: {
-			name: string;
-			images: { url: string }[];
-		};
-	} | null;
+	item: SpotifyPlayingItem | null;
 };

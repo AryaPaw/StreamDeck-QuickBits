@@ -7,10 +7,11 @@ import {
 import { spotifyAPI, loadSpotifySettings, getSpotifySettings, spotifyState, SpotifyPlaybackState } from "../shared/spotify";
 
 // Play icon SVG overlay (shown when paused)
-const PLAY_OVERLAY = `<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144">
-  <circle cx="72" cy="72" r="26" fill="rgba(0,0,0,0.6)"/>
-  <path d="M66 60l20 12-20 12V60z" fill="#fff"/>
-</svg>`;
+const PLAY_OVERLAY = `<svg width="144" height="144" viewBox="0 0 144 144" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M72 120C98.5097 120 120 98.5097 120 72C120 45.4903 98.5097 24 72 24C45.4903 24 24 45.4903 24 72C24 98.5097 45.4903 120 72 120Z" fill="black" fill-opacity="0.6"/>
+<path d="M58 50L96 72L58 94V50Z" fill="white"/>
+</svg>
+`;
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-now-playing" })
 export class SpotifyNowPlayingAction extends SingletonAction {
