@@ -1,10 +1,13 @@
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using Windows.Media.Control;
+using Windows.Storage.Streams;
 
 namespace QuickbitsHelper;
 
 internal static class Program
 {
-    static int Main(string[] args)
+    static async Task<int> Main(string[] args)
     {
         if (args.Length == 0)
         {
@@ -12,6 +15,11 @@ internal static class Program
             Console.Error.WriteLine("Commands:");
             Console.Error.WriteLine("  set-volume --percent <0-100>");
             Console.Error.WriteLine("  toggle-dnd");
+            Console.Error.WriteLine("  media-play-pause");
+            Console.Error.WriteLine("  media-next");
+            Console.Error.WriteLine("  media-previous");
+            Console.Error.WriteLine("  media-info [--source <name>]");
+            Console.Error.WriteLine("  media-like");
             return 1;
         }
 
@@ -23,6 +31,11 @@ internal static class Program
             {
                 "set-volume" => HandleSetVolume(args),
                 "toggle-dnd" => HandleToggleDnd(),
+                "media-play-pause" => HandleMediaPlayPause(),
+                "media-next" => HandleMediaNext(),
+                "media-previous" => HandleMediaPrevious(),
+                "media-info" => await HandleMediaInfo(args),
+                "media-like" => HandleMediaLike(),
                 _ => UnknownCommand(command)
             };
         }
@@ -74,6 +87,51 @@ internal static class Program
         Keyboard.Key(VK.ESCAPE);
 
         Console.WriteLine("DND toggled");
+        return 0;
+    }
+
+    static int HandleMediaPlayPause()
+    {
+        Keyboard.Key(VK.MEDIA_PLAY_PAUSE);
+        Console.WriteLine("Play/Pause sent");
+        return 0;
+    }
+
+    static int HandleMediaNext()
+    {
+        Keyboard.Key(VK.MEDIA_NEXT_TRACK);
+        Console.WriteLine("Next track sent");
+        return 0;
+    }
+
+    static int HandleMediaPrevious()
+    {
+        Keyboard.Key(VK.MEDIA_PREV_TRACK);
+        Console.WriteLine("Previous track sent");
+        return 0;
+    }
+
+    static int HandleMediaLike()
+    {
+        Keyboard.KeyCombo3(VK.CONTROL, VK.SHIFT, VK.S);
+        Console.WriteLine("Like hotkey sent");
+        return 0;
+    }
+
+    static async Task<int> HandleMediaInfo(string[] args)
+    {
+        string? sourceFilter = null;
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] == "--source" && i + 1 < args.Length)
+            {
+                sourceFilter = args[i + 1].ToLowerInvariant();
+                i++;
+            }
+        }
+
+        var info = await MediaSession.GetCurrentMediaInfo(sourceFilter);
+        Console.WriteLine(JsonSerializer.Serialize(info));
         return 0;
     }
 
@@ -194,6 +252,12 @@ internal static class VK
     public const byte ESCAPE = 0x1B;
     public const byte LWIN = 0x5B;
     public const byte N = 0x4E;
+    public const byte S = 0x53;
+    public const byte CONTROL = 0x11;
+    public const byte SHIFT = 0x10;
+    public const byte MEDIA_NEXT_TRACK = 0xB0;
+    public const byte MEDIA_PREV_TRACK = 0xB1;
+    public const byte MEDIA_PLAY_PAUSE = 0xB3;
 }
 
 internal static class Keyboard
@@ -215,6 +279,84 @@ internal static class Keyboard
         keybd_event(key2, 0, 0, UIntPtr.Zero);
         keybd_event(key2, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
         keybd_event(key1, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+
+    public static void KeyCombo3(byte key1, byte key2, byte key3)
+    {
+        keybd_event(key1, 0, 0, UIntPtr.Zero);
+        keybd_event(key2, 0, 0, UIntPtr.Zero);
+        keybd_event(key3, 0, 0, UIntPtr.Zero);
+        keybd_event(key3, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        keybd_event(key2, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+        keybd_event(key1, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
+    }
+}
+
+internal static class MediaSession
+{
+    public record MediaInfo(
+        string? Title,
+        string? Artist,
+        string? Album,
+        string? Source,
+        string? PlaybackStatus,
+        string? Thumbnail
+    );
+
+    public static async Task<MediaInfo> GetCurrentMediaInfo(string? sourceFilter = null)
+    {
+        var sessionManager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync();
+        var sessions = sessionManager.GetSessions();
+
+        GlobalSystemMediaTransportControlsSession? targetSession = null;
+
+        if (!string.IsNullOrEmpty(sourceFilter))
+        {
+            targetSession = sessions.FirstOrDefault(s =>
+                s.SourceAppUserModelId.ToLowerInvariant().Contains(sourceFilter));
+        }
+
+        targetSession ??= sessionManager.GetCurrentSession();
+
+        if (targetSession == null)
+        {
+            return new MediaInfo(null, null, null, null, null, null);
+        }
+
+        var mediaProps = await targetSession.TryGetMediaPropertiesAsync();
+        var playbackInfo = targetSession.GetPlaybackInfo();
+
+        string? thumbnailBase64 = null;
+        if (mediaProps?.Thumbnail != null)
+        {
+            try
+            {
+                var stream = await mediaProps.Thumbnail.OpenReadAsync();
+                using var reader = new DataReader(stream);
+                await reader.LoadAsync((uint)stream.Size);
+                var bytes = new byte[stream.Size];
+                reader.ReadBytes(bytes);
+                thumbnailBase64 = Convert.ToBase64String(bytes);
+            }
+            catch { }
+        }
+
+        var status = playbackInfo?.PlaybackStatus switch
+        {
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing => "playing",
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused => "paused",
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus.Stopped => "stopped",
+            _ => "unknown"
+        };
+
+        return new MediaInfo(
+            mediaProps?.Title,
+            mediaProps?.Artist,
+            mediaProps?.AlbumTitle,
+            targetSession.SourceAppUserModelId,
+            status,
+            thumbnailBase64
+        );
     }
 }
 

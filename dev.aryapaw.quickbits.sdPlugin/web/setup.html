@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>QuickBits — Connect Spotify</title>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+	<style>
+		*, *::before, *::after {
+			box-sizing: border-box;
+			margin: 0;
+			padding: 0;
+		}
+
+		body {
+			background-color: #0a0a0a;
+			color: #e0e0e0;
+			font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+			font-size: 14px;
+			line-height: 1.6;
+			min-height: 100vh;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}
+
+		.card {
+			width: 100%;
+			max-width: 520px;
+			margin: 32px 16px;
+			padding: 36px;
+			background: #141414;
+			border: 1px solid #252525;
+			border-radius: 16px;
+		}
+
+		.header {
+			display: flex;
+			align-items: center;
+			gap: 14px;
+			margin-bottom: 28px;
+		}
+
+		.logo {
+			width: 44px;
+			height: 44px;
+			background: linear-gradient(135deg, #1DB954 0%, #169c46 100%);
+			border-radius: 10px;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}
+
+		.logo svg {
+			width: 24px;
+			height: 24px;
+			fill: #fff;
+		}
+
+		.header-text h1 {
+			font-size: 20px;
+			font-weight: 600;
+			letter-spacing: -0.3px;
+		}
+
+		.header-text span {
+			font-size: 12px;
+			color: #666;
+			text-transform: uppercase;
+			letter-spacing: 0.8px;
+		}
+
+		.notice {
+			background: rgba(251, 191, 36, 0.08);
+			border: 1px solid rgba(251, 191, 36, 0.2);
+			border-radius: 8px;
+			padding: 12px 14px;
+			margin-bottom: 24px;
+			font-size: 13px;
+			color: #d4a520;
+		}
+
+		.steps {
+			color: #999;
+			margin-bottom: 28px;
+		}
+
+		.steps ol {
+			padding-left: 18px;
+		}
+
+		.steps li {
+			margin-bottom: 6px;
+			font-size: 13px;
+		}
+
+		.steps li::marker {
+			color: #1DB954;
+			font-weight: 600;
+		}
+
+		.steps a {
+			color: #1DB954;
+			text-decoration: none;
+		}
+
+		.steps a:hover {
+			text-decoration: underline;
+		}
+
+		.steps code {
+			background: #1c1c1c;
+			border: 1px solid #2a2a2a;
+			border-radius: 4px;
+			padding: 2px 6px;
+			font-size: 12px;
+			font-family: 'SF Mono', Consolas, monospace;
+			color: #e0e0e0;
+			cursor: pointer;
+			transition: border-color 0.15s;
+		}
+
+		.steps code:hover {
+			border-color: #1DB954;
+		}
+
+		.steps b {
+			color: #e0e0e0;
+			font-weight: 500;
+		}
+
+		form {
+			display: flex;
+			flex-direction: column;
+			gap: 12px;
+		}
+
+		input[type="text"],
+		input[type="password"] {
+			width: 100%;
+			padding: 12px 14px;
+			background: #1a1a1a;
+			border: 1px solid #2a2a2a;
+			border-radius: 8px;
+			color: #fff;
+			font-family: inherit;
+			font-size: 14px;
+			outline: none;
+			transition: border-color 0.15s, box-shadow 0.15s;
+		}
+
+		input::placeholder {
+			color: #555;
+		}
+
+		input:focus {
+			border-color: #1DB954;
+			box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.12);
+		}
+
+		button[type="submit"] {
+			width: 100%;
+			padding: 12px;
+			background: #1DB954;
+			border: none;
+			border-radius: 8px;
+			color: #000;
+			font-family: inherit;
+			font-size: 14px;
+			font-weight: 600;
+			cursor: pointer;
+			transition: background 0.15s, transform 0.1s;
+			margin-top: 4px;
+		}
+
+		button[type="submit"]:hover {
+			background: #1ed760;
+		}
+
+		button[type="submit"]:active {
+			transform: scale(0.98);
+		}
+
+		button[type="submit"]:disabled {
+			background: #333;
+			color: #666;
+			cursor: not-allowed;
+			transform: none;
+		}
+
+		.message {
+			display: none;
+			margin-top: 16px;
+			padding: 12px 14px;
+			border-radius: 8px;
+			text-align: center;
+			font-size: 13px;
+		}
+
+		.message.error {
+			display: block;
+			background: rgba(239, 68, 68, 0.1);
+			border: 1px solid rgba(239, 68, 68, 0.25);
+			color: #ef4444;
+		}
+
+		.message.success {
+			display: block;
+			background: rgba(29, 185, 84, 0.1);
+			border: 1px solid rgba(29, 185, 84, 0.25);
+			color: #1DB954;
+		}
+
+		.message.loading {
+			display: block;
+			background: rgba(255, 255, 255, 0.05);
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			color: #999;
+		}
+
+		.success-view {
+			display: none;
+			text-align: center;
+			padding: 24px 0;
+		}
+
+		.success-view svg {
+			width: 48px;
+			height: 48px;
+			fill: #1DB954;
+			margin-bottom: 16px;
+		}
+
+		.success-view h2 {
+			font-size: 18px;
+			font-weight: 600;
+			color: #1DB954;
+			margin-bottom: 8px;
+		}
+
+		.success-view p {
+			color: #666;
+			font-size: 14px;
+		}
+
+		::selection {
+			background: #1DB954;
+			color: #fff;
+		}
+	</style>
+</head>
+<body>
+	<div class="card">
+		<div class="header">
+			<div class="logo">
+				<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 14.36c-.2.32-.64.42-.96.22-2.64-1.62-5.96-1.98-9.88-1.08-.38.08-.76-.14-.84-.52s.14-.76.52-.84c4.28-.98 7.96-.56 10.94 1.26.32.2.42.64.22.96zm1.22-2.7c-.26.4-.8.52-1.2.26-3.02-1.86-7.62-2.4-11.18-1.32-.44.14-.9-.12-1.04-.56-.14-.44.12-.9.56-1.04 4.06-1.24 9.12-.64 12.6 1.5.4.24.52.78.26 1.16zm.1-2.8c-3.62-2.16-9.6-2.36-13.06-1.3-.54.16-1.12-.14-1.28-.68-.16-.54.14-1.12.68-1.28 3.96-1.2 10.56-.98 14.74 1.5.5.3.66.94.36 1.44-.3.48-.94.64-1.44.32z"/></svg>
+			</div>
+			<div class="header-text">
+				<h1>QuickBits</h1>
+				<span>Connect Spotify</span>
+			</div>
+		</div>
+
+		<div class="main-view">
+			<div class="notice">
+				<b>Note:</b> If using a VPN, temporarily disable it during setup.
+			</div>
+
+			<div class="steps">
+				<ol>
+					<li>Open <a href="https://developer.spotify.com/dashboard" target="_blank">Spotify Developer Dashboard</a></li>
+					<li><a href="https://developer.spotify.com/dashboard/create" target="_blank">Create a new app</a></li>
+					<li>Set Redirect URI to <code id="redirect-uri">http://127.0.0.1:5789/callback</code></li>
+					<li>Select <b>Web API</b> in "APIs used"</li>
+					<li>Save the app and open <b>Settings</b></li>
+					<li>Copy <b>Client ID</b> and <b>Client Secret</b> below</li>
+				</ol>
+			</div>
+
+			<form id="form">
+				<input type="text" id="clientId" placeholder="Client ID" required autocomplete="off" spellcheck="false">
+				<input type="password" id="clientSecret" placeholder="Client Secret" required autocomplete="off">
+				<button type="submit" id="submitBtn">Connect to Spotify</button>
+			</form>
+
+			<div id="message" class="message"></div>
+		</div>
+
+		<div class="success-view" id="successView">
+			<svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+			<h2>Connected!</h2>
+			<p>You can close this page now.</p>
+		</div>
+	</div>
+
+	<script>
+		const form = document.getElementById('form');
+		const message = document.getElementById('message');
+		const submitBtn = document.getElementById('submitBtn');
+		const mainView = document.querySelector('.main-view');
+		const successView = document.getElementById('successView');
+
+		// Copy redirect URI on click
+		document.getElementById('redirect-uri').addEventListener('click', function() {
+			navigator.clipboard.writeText(this.textContent);
+			this.style.borderColor = '#1DB954';
+			setTimeout(() => this.style.borderColor = '', 1000);
+		});
+
+		function showMessage(type, text) {
+			message.className = 'message ' + type;
+			message.textContent = text;
+		}
+
+		// Check URL params for result
+		const params = new URLSearchParams(window.location.search);
+		if (params.get('success') === 'true') {
+			mainView.style.display = 'none';
+			successView.style.display = 'block';
+		} else if (params.get('error')) {
+			const err = params.get('error');
+			const messages = {
+				'token_failed': 'Token exchange failed. Check your credentials.',
+				'auth_failed': 'Authorization was denied or cancelled.',
+				'access_denied': 'Access was denied. Please try again.'
+			};
+			showMessage('error', messages[err] || 'Authorization failed: ' + err);
+		}
+
+		form.addEventListener('submit', async (e) => {
+			e.preventDefault();
+
+			const clientId = document.getElementById('clientId').value.trim();
+			const clientSecret = document.getElementById('clientSecret').value.trim();
+
+			if (!clientId || !clientSecret) {
+				showMessage('error', 'Please enter both Client ID and Secret');
+				return;
+			}
+
+			submitBtn.disabled = true;
+			showMessage('loading', 'Connecting...');
+
+			try {
+				const res = await fetch('/submit', {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ clientId, clientSecret })
+				});
+
+				const data = await res.json();
+
+				if (data.success && data.authUrl) {
+					showMessage('success', 'Redirecting to Spotify...');
+					setTimeout(() => window.location.href = data.authUrl, 500);
+				} else {
+					showMessage('error', data.error || 'Connection failed');
+					submitBtn.disabled = false;
+				}
+			} catch {
+				showMessage('error', 'Network error. Check if plugin is running.');
+				submitBtn.disabled = false;
+			}
+		});
+	</script>
+</body>
+</html>

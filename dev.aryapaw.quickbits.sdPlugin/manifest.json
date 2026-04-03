@@ -1,5 +1,5 @@
 {
-	"Name": "Quickbits",
+	"Name": "QuickBits",
 	"Version": "0.1.0.0",
 	"Author": "AryaPaw",
 	"Actions": [
@@ -9,30 +9,57 @@
 			"Icon": "imgs/actions/set-volume/icon",
 			"Tooltip": "Set system volume to a specific percentage",
 			"PropertyInspectorPath": "ui/set-volume.html",
-			"Controllers": [
-				"Keypad"
-			],
-			"States": [
-				{
-					"Image": "imgs/actions/set-volume/key",
-					"TitleAlignment": "middle"
-				}
-			]
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/set-volume/key", "TitleAlignment": "bottom" }]
 		},
 		{
 			"Name": "Toggle DND",
 			"UUID": "dev.aryapaw.quickbits.toggle-dnd",
 			"Icon": "imgs/actions/toggle-dnd/icon",
 			"Tooltip": "Toggle Windows Do Not Disturb mode",
-			"Controllers": [
-				"Keypad"
-			],
-			"States": [
-				{
-					"Image": "imgs/actions/toggle-dnd/key",
-					"TitleAlignment": "middle"
-				}
-			]
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/toggle-dnd/key", "TitleAlignment": "bottom" }]
+		},
+		{
+			"Name": "Spotify: Setup",
+			"UUID": "dev.aryapaw.quickbits.spotify-setup",
+			"Icon": "imgs/actions/spotify/icon",
+			"Tooltip": "Configure Spotify API credentials",
+			"PropertyInspectorPath": "ui/spotify-setup.html",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/spotify/key", "TitleAlignment": "middle" }]
+		},
+		{
+			"Name": "Spotify: Now Playing",
+			"UUID": "dev.aryapaw.quickbits.spotify-now-playing",
+			"Icon": "imgs/actions/spotify/play",
+			"Tooltip": "Show current track, press to play/pause",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/spotify/play", "TitleAlignment": "bottom" }]
+		},
+		{
+			"Name": "Spotify: Previous",
+			"UUID": "dev.aryapaw.quickbits.spotify-previous",
+			"Icon": "imgs/actions/spotify/previous",
+			"Tooltip": "Previous track",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/spotify/previous" }]
+		},
+		{
+			"Name": "Spotify: Next",
+			"UUID": "dev.aryapaw.quickbits.spotify-next",
+			"Icon": "imgs/actions/spotify/next",
+			"Tooltip": "Next track",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/spotify/next" }]
+		},
+		{
+			"Name": "Spotify: Like",
+			"UUID": "dev.aryapaw.quickbits.spotify-like",
+			"Icon": "imgs/actions/spotify/like",
+			"Tooltip": "Add or remove current track from liked songs",
+			"Controllers": ["Keypad"],
+			"States": [{ "Image": "imgs/actions/spotify/like" }]
 		}
 	],
 	"Category": "Quickbits",

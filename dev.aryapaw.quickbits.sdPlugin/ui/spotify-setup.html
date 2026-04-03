@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Spotify Setup</title>
+    <link rel="stylesheet" href="sdpi.css" />
+    <script src="sdpi-components.js"></script>
+    <style>
+        .instructions {
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 4px;
+            margin-bottom: 12px;
+            font-size: 12px;
+            line-height: 1.5;
+            color: #fff;
+
+        }
+        .instructions h3 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #fff;
+        }
+        .instructions ol {
+            margin: 0;
+            padding-left: 16px;
+        }
+        .instructions li {
+            margin-bottom: 4px;
+        }
+        .instructions a {
+            color: #0078ff;
+        }
+        .instructions code {
+            background: rgba(0,0,0,0.3);
+            padding: 1px 4px;
+            border-radius: 2px;
+            font-family: monospace;
+        }
+        .status {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 12px;
+            font-size: 12px;
+        }
+        .status.connected {
+            background: rgba(0,200,83,0.2);
+            border: 1px solid rgba(0,200,83,0.4);
+        }
+        .status.disconnected {
+            background: rgba(255,82,82,0.2);
+            border: 1px solid rgba(255,82,82,0.4);
+        }
+    </style>
+</head>
+<body>
+    <sdpi-wrapper>
+        <div class="instructions">
+            <h3>How to get Spotify API credentials:</h3>
+            <ol>
+                <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank">developer.spotify.com/dashboard</a></li>
+                <li>Log in with your Spotify account</li>
+                <li>Click <strong>Create app</strong></li>
+                <li>Fill in:
+                    <br/>• App name: <code>QuickBits</code>
+                    <br/>• App description: <code>Stream Deck plugin</code>
+                    <br/>• Redirect URI: <code>http://127.0.0.1:5789/callback</code>
+                </li>
+                <li>Check <strong>Web API</strong> checkbox</li>
+                <li>Click <strong>Save</strong></li>
+                <li>Go to <strong>Settings</strong> to find your Client ID and Client Secret</li>
+            </ol>
+        </div>
+
+        <sdpi-item label="Client ID">
+            <sdpi-textfield setting="clientId" placeholder="Enter your Client ID"></sdpi-textfield>
+        </sdpi-item>
+
+        <sdpi-item label="Client Secret">
+            <sdpi-textfield setting="clientSecret" type="password" placeholder="Enter your Client Secret"></sdpi-textfield>
+        </sdpi-item>
+
+        <sdpi-item label="">
+            <sdpi-button id="authorize-btn">Authorize with Spotify</sdpi-button>
+        </sdpi-item>
+
+        <div id="status" class="status disconnected">
+            Status: Not connected
+        </div>
+    </sdpi-wrapper>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const authorizeBtn = document.getElementById('authorize-btn');
+        let sdConnection = null;
+        let actionInfo = null;
+
+        function updateStatus(connected, message) {
+            statusEl.className = 'status ' + (connected ? 'connected' : 'disconnected');
+            statusEl.textContent = 'Status: ' + message;
+        }
+
+        // Connect to Stream Deck
+        function connectElgatoStreamDeckSocket(inPort, inPropertyInspectorUUID, inRegisterEvent, inInfo, inActionInfo) {
+            actionInfo = JSON.parse(inActionInfo);
+
+            // Check if already connected
+            if (actionInfo.payload && actionInfo.payload.settings && actionInfo.payload.settings.refreshToken) {
+                updateStatus(true, 'Connected to Spotify!');
+            }
+
+            sdConnection = new WebSocket('ws://127.0.0.1:' + inPort);
+
+            sdConnection.onopen = function() {
+                sdConnection.send(JSON.stringify({
+                    event: inRegisterEvent,
+                    uuid: inPropertyInspectorUUID
+                }));
+            };
+
+            sdConnection.onmessage = function(evt) {
+                const data = JSON.parse(evt.data);
+                if (data.event === 'sendToPropertyInspector') {
+                    if (data.payload && data.payload.status) {
+                        updateStatus(data.payload.status === 'connected', data.payload.message || data.payload.status);
+                    }
+                }
+                if (data.event === 'didReceiveSettings') {
+                    if (data.payload && data.payload.settings && data.payload.settings.refreshToken) {
+                        updateStatus(true, 'Connected to Spotify!');
+                    }
+                }
+            };
+        }
+
+        authorizeBtn.addEventListener('click', () => {
+            if (sdConnection && sdConnection.readyState === WebSocket.OPEN && actionInfo) {
+                sdConnection.send(JSON.stringify({
+                    event: 'sendToPlugin',
+                    action: actionInfo.action,
+                    context: actionInfo.context,
+                    payload: { event: 'authorize' }
+                }));
+                updateStatus(false, 'Opening browser...');
+            } else {
+                updateStatus(false, 'Connection error, try again');
+            }
+        });
+    </script>
+</body>
+</html>
