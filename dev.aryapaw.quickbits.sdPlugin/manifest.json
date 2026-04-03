@@ -1,6 +1,6 @@
 {
 	"Name": "QuickBits",
-	"Version": "0.1.0.0",
+	"Version": "0.1.0.1",
 	"Author": "AryaPaw",
 	"Actions": [
 		{
@@ -19,6 +19,20 @@
 			"Tooltip": "Toggle Windows Do Not Disturb mode",
 			"Controllers": ["Keypad"],
 			"States": [{ "Image": "imgs/actions/toggle-dnd/key", "TitleAlignment": "bottom" }]
+		},
+		{
+			"Name": "Skydimo: lighting (foreground triggers)",
+			"UUID": "dev.aryapaw.quickbits.marker-skydimo-screen-sync",
+			"Icon": "imgs/actions/marker-skydimo-screen-sync/icon",
+			"Tooltip": "Skydimo: Static or Sync via brief foreground trigger apps",
+			"Controllers": ["Keypad"],
+			"States": [
+				{
+					"Image": "imgs/actions/marker-skydimo-screen-sync/static",
+					"Title": "Static",
+					"TitleAlignment": "bottom"
+				}
+			]
 		},
 		{
 			"Name": "Spotify: Setup",

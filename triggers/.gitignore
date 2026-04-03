@@ -1,0 +1,3 @@
+# .NET publish / intermediate (also covered by repo root **/bin/ and **/obj/)
+bin/
+obj/

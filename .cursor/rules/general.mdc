@@ -1,0 +1,105 @@
+---
+alwaysApply: true
+---
+
+# QuickBits — Stream Deck Plugin
+
+## Project Structure
+
+- **TypeScript plugin**: `src/` → builds to `dev.aryapaw.quickbits.sdPlugin/bin/plugin.js`
+- **C# helper**: `helper/` → publishes to `dev.aryapaw.quickbits.sdPlugin/helper/QuickbitsHelper.exe`
+- **Skydimo trigger apps**: `triggers/` → publish to `dev.aryapaw.quickbits.sdPlugin/triggers/` (`SkydimoTrigger.ScreenSync.exe`, `SkydimoTrigger.ScreenStatic.exe`)
+- **Property Inspector**: `dev.aryapaw.quickbits.sdPlugin/ui/` (uses sdpi-components.js locally)
+- **Icons**: `dev.aryapaw.quickbits.sdPlugin/imgs/`
+
+## Tech Stack
+
+- Stream Deck SDK 2.x with TypeScript decorators (`@elgato/streamdeck`)
+- Rollup for bundling
+- .NET 8 for Windows-specific helper (self-contained single-file publish)
+- sdpi-components for Property Inspector UI (local copy, NOT npm)
+
+## Build Commands
+
+- `bun run build` — full build (helper + Skydimo triggers + plugin)
+- `bun run build:helper` — only C# helper
+- `bun run build:triggers` — only Skydimo foreground trigger exes
+- `bun run build:plugin` — only TypeScript plugin
+- `bun run watch` — dev mode with hot reload
+
+## Key Conventions
+
+1. **ES Modules**: Use `import.meta.url` instead of `__dirname`
+2. **Helper communication**: Via `child_process.execFile`, returns `{ success, output }`
+3. **Settings persistence**: Use sdpi-components with `setting` attribute for auto-persistence
+4. **Icons**: SVG format, placed in `imgs/actions/{action-name}/`
+5. **Manifest**: `dev.aryapaw.quickbits.sdPlugin/manifest.json`
+
+## Actions
+
+| Action             | UUID                                       | Settings          | Description                           |
+| ------------------ | ------------------------------------------ | ----------------- | ------------------------------------- |
+| Set Volume         | `dev.aryapaw.quickbits.set-volume`         | `percent: number` | Set system volume via helper          |
+| Toggle DND         | `dev.aryapaw.quickbits.toggle-dnd`         | none              | Toggle Do Not Disturb via helper      |
+| Skydimo lighting   | `dev.aryapaw.quickbits.marker-skydimo-screen-sync` | `screenSyncActive: boolean` | Foreground trigger apps for Skydimo automation |
+| Spotify: Setup     | `dev.aryapaw.quickbits.spotify-setup`      | OAuth credentials | Configure Spotify API                 |
+| Spotify: Now Play  | `dev.aryapaw.quickbits.spotify-now-playing`| none              | Show track + play/pause control       |
+| Spotify: Previous  | `dev.aryapaw.quickbits.spotify-previous`   | none              | Previous track                        |
+| Spotify: Next      | `dev.aryapaw.quickbits.spotify-next`       | none              | Next track                            |
+| Spotify: Like      | `dev.aryapaw.quickbits.spotify-like`       | none              | Toggle liked status                   |
+
+## Spotify Integration
+
+**Architecture:**
+- `SpotifyAuth`: OAuth 2.0 flow with local HTTP server (port 5789)
+- `SpotifyAPI`: Web API wrapper (getCurrentTrack, playPause, etc.)
+- `SpotifyState`: Centralized polling (500ms) with event subscriptions
+- Global settings storage via Stream Deck SDK
+
+**OAuth Flow:**
+1. User opens Setup page → enters Client ID/Secret
+2. Redirect to Spotify authorization
+3. Callback exchanges code for access + refresh tokens
+4. Tokens stored in Stream Deck global settings
+
+**State Management:**
+- Single polling loop (500ms interval) when actions visible
+- All actions subscribe to state changes
+- Automatic token refresh on 401
+
+**Scopes:**
+- `user-read-playback-state`
+- `user-modify-playback-state`
+- `user-read-currently-playing`
+- `user-library-read`
+- `user-library-modify`
+
+## Process Management
+
+**ProcessManager** (`src/shared/process-manager.ts`):
+- `spawn` with `detached: true` for short-lived trigger exes (Windows)
+- `startGuiTriggerProcess`: `windowsHide: false` so WinForms can foreground
+
+**SkydimoLightingToggleAction** (`skydimo-lighting-toggle.ts`):
+- Launches `SkydimoTrigger.ScreenSync.exe` or `SkydimoTrigger.ScreenStatic.exe` (WinForms, brief foreground, auto-exit)
+- Key UI: **single** manifest state; `setImage(static|sync)` + `setTitle` (avoids `setState` / dual-state title quirks)
+- Persists last mode in action settings (`screenSyncActive`); not a live Skydimo API read
+
+## Helper Commands
+
+```bash
+QuickbitsHelper.exe set-volume --percent <0-100>
+QuickbitsHelper.exe toggle-dnd
+```
+
+## Windows APIs Used
+
+- **Volume**: Core Audio API (IMMDeviceEnumerator, IAudioEndpointVolume)
+- **Keyboard simulation**: `keybd_event` for reliable background input
+- **DND**: UI macro (Win+N, Enter, Esc)
+
+## Important Notes
+
+- Helper must be self-contained (`SelfContained=true`) to avoid DLL dependencies
+- Use `keybd_event` instead of `SendInput` for background processes
+- Volume flyout: press VolumeDown then VolumeUp to trigger system UI

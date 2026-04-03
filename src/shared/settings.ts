@@ -4,6 +4,11 @@ export type SetVolumeSettings = {
 
 export type ToggleDndSettings = Record<string, never>;
 
+/** Persisted Stream Deck action state: last successful lighting mode chosen via trigger apps */
+export type SkydimoLightingToggleSettings = {
+	screenSyncActive?: boolean;
+};
+
 const DEFAULT_PERCENT = 30;
 
 export function normalizePercent(value: unknown): number {
