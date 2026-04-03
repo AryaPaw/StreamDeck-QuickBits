@@ -1,12 +1,11 @@
 import streamDeck from "@elgato/streamdeck";
 
-import { IncrementCounter } from "./actions/increment-counter";
+import { SetVolumeAction } from "./actions/set-volume";
+import { ToggleDndAction } from "./actions/toggle-dnd";
 
-// We can enable "trace" logging so that all messages between the Stream Deck, and the plugin are recorded. When storing sensitive information
-streamDeck.logger.setLevel("trace");
+streamDeck.logger.setLevel("debug");
 
-// Register the increment action.
-streamDeck.actions.registerAction(new IncrementCounter());
+streamDeck.actions.registerAction(new SetVolumeAction());
+streamDeck.actions.registerAction(new ToggleDndAction());
 
-// Finally, connect to the Stream Deck.
 streamDeck.connect();

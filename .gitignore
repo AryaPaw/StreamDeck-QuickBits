@@ -1,6 +1,10 @@
 # Node.js
 node_modules/
 
-# Stream Deck files
-*.sdPlugin/bin
-*.sdPlugin/logs
+# Stream Deck
+*.sdPlugin/bin/
+*.sdPlugin/logs/
+*.sdPlugin/helper/
+
+# Lockfiles (optional - remove if you want to track)
+bun.lock

@@ -1,6 +1,8 @@
 {
     "scripts": {
-        "build": "rollup -c",
+        "build": "bun run build:helper && rollup -c",
+        "build:helper": "dotnet publish helper -c Release && shx cp helper/bin/Release/net8.0-windows/win-x64/publish/QuickbitsHelper.exe dev.aryapaw.quickbits.sdPlugin/helper/",
+        "build:plugin": "rollup -c",
         "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart dev.aryapaw.quickbits\""
     },
     "type": "module",
@@ -13,6 +15,7 @@
         "@tsconfig/node20": "^20.1.2",
         "@types/node": "~20.15.0",
         "rollup": "^4.0.2",
+        "shx": "^0.4.0",
         "tslib": "^2.6.2",
         "typescript": "^5.2.2"
     },

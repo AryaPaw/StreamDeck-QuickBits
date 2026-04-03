@@ -1,39 +1,50 @@
 {
-	"Name": "QuickBits",
+	"Name": "Quickbits",
 	"Version": "0.1.0.0",
 	"Author": "AryaPaw",
 	"Actions": [
 		{
-			"Name": "Counter",
-			"UUID": "dev.aryapaw.quickbits.increment",
-			"Icon": "imgs/actions/counter/icon",
-			"Tooltip": "Displays a count, which increments by one on press.",
-			"PropertyInspectorPath": "ui/increment-counter.html",
+			"Name": "Set Volume",
+			"UUID": "dev.aryapaw.quickbits.set-volume",
+			"Icon": "imgs/actions/set-volume/icon",
+			"Tooltip": "Set system volume to a specific percentage",
+			"PropertyInspectorPath": "ui/set-volume.html",
 			"Controllers": [
 				"Keypad"
 			],
 			"States": [
 				{
-					"Image": "imgs/actions/counter/key",
+					"Image": "imgs/actions/set-volume/key",
+					"TitleAlignment": "middle"
+				}
+			]
+		},
+		{
+			"Name": "Toggle DND",
+			"UUID": "dev.aryapaw.quickbits.toggle-dnd",
+			"Icon": "imgs/actions/toggle-dnd/icon",
+			"Tooltip": "Toggle Windows Do Not Disturb mode",
+			"Controllers": [
+				"Keypad"
+			],
+			"States": [
+				{
+					"Image": "imgs/actions/toggle-dnd/key",
 					"TitleAlignment": "middle"
 				}
 			]
 		}
 	],
-	"Category": "QuickBits",
+	"Category": "Quickbits",
 	"CategoryIcon": "imgs/plugin/category-icon",
 	"CodePath": "bin/plugin.js",
-	"Description": "Description...",
+	"Description": "A collection of small useful actions for Stream Deck",
 	"Icon": "imgs/plugin/marketplace",
 	"SDKVersion": 3,
 	"Software": {
 		"MinimumVersion": "6.9"
 	},
 	"OS": [
-		{
-			"Platform": "mac",
-			"MinimumVersion": "12"
-		},
 		{
 			"Platform": "windows",
 			"MinimumVersion": "10"

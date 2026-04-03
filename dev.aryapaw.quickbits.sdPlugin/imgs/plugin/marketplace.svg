@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 288 288">
+  <rect width="288" height="288" fill="#1a1a2e"/>
+  <rect x="24" y="24" width="100" height="100" rx="12" fill="#4a4a6a"/>
+  <rect x="164" y="24" width="100" height="100" rx="12" fill="#4a4a6a"/>
+  <rect x="24" y="164" width="100" height="100" rx="12" fill="#4a4a6a"/>
+  <rect x="164" y="164" width="100" height="100" rx="12" fill="#4a4a6a"/>
+  <text x="144" y="160" text-anchor="middle" font-family="Arial" font-size="48" font-weight="bold" fill="#ffffff">QB</text>
+</svg>
