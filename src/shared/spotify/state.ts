@@ -6,7 +6,11 @@ import type { SpotifyLocalState } from "./local/types";
 import type { SpotifyPlaybackState, SpotifyTrack, StateListener } from "./types";
 
 const TRANSITION_HOLD_MS = 1000;
-const PLAYING_GRACE_MS = 2000;
+const TRANSPORT_PLAYING_GRACE_MS = 500;
+const LIKE_SYNC_INTERVAL_MS = 25_000;
+const LIKE_PLAYING_DEBOUNCE_MS = 3_000;
+const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
+const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
 
 class SpotifyState {
 	private listeners: Set<StateListener> = new Set();
@@ -14,9 +18,13 @@ class SpotifyState {
 	private currentState: SpotifyPlaybackState = { track: null, isLiked: false };
 	private lastTrackId: string | null = null;
 	private lastTrackAt = 0;
-	private playingGraceUntil = 0;
 	private lastWasPlaying = false;
 	private likedCheckInFlight = false;
+	private likeSyncRefs = 0;
+	private likeSyncTimer: ReturnType<typeof setInterval> | null = null;
+	private likePlayingDebounce: ReturnType<typeof setTimeout> | null = null;
+	private likeSkipUntil = 0;
+	private playingOptimisticUntil = 0;
 	private localStateChain: Promise<void> = Promise.resolve();
 
 	subscribe(listener: StateListener): () => void {
@@ -40,6 +48,20 @@ class SpotifyState {
 		};
 	}
 
+	registerLikeSync(): void {
+		this.likeSyncRefs += 1;
+		if (this.likeSyncRefs === 1) {
+			this.startLikeSyncTimer();
+		}
+	}
+
+	unregisterLikeSync(): void {
+		this.likeSyncRefs = Math.max(0, this.likeSyncRefs - 1);
+		if (this.likeSyncRefs === 0) {
+			this.stopLikeSyncTimer();
+		}
+	}
+
 	private emit(state: SpotifyPlaybackState): void {
 		for (const listener of this.listeners) {
 			listener(state);
@@ -48,24 +70,21 @@ class SpotifyState {
 
 	private applyPlayingGrace(track: SpotifyTrack, local: SpotifyLocalState): SpotifyTrack {
 		const playbackState = local.player.state;
-		const now = Date.now();
 
 		if (playbackState === "playing") {
 			this.lastWasPlaying = true;
-			this.playingGraceUntil = 0;
 			return { ...track, isPlaying: true };
 		}
 
 		if (
 			(playbackState === "paused" || playbackState === "unknown") &&
-			now < this.playingGraceUntil
+			spotifyLocalClient.wasRecentSkipTransport(TRANSPORT_PLAYING_GRACE_MS)
 		) {
 			return { ...track, isPlaying: true };
 		}
 
 		if (playbackState === "paused" || playbackState === "stopped") {
 			this.lastWasPlaying = false;
-			this.playingGraceUntil = 0;
 		}
 
 		return { ...track, isPlaying: false };
@@ -85,6 +104,13 @@ class SpotifyState {
 			}
 		} else {
 			track = this.applyPlayingGrace(track, local);
+			if (Date.now() < this.playingOptimisticUntil && this.currentState.track) {
+				if (track.isPlaying === this.currentState.track.isPlaying) {
+					this.playingOptimisticUntil = 0;
+				} else {
+					track = { ...track, isPlaying: this.currentState.track.isPlaying };
+				}
+			}
 			this.lastTrackAt = Date.now();
 
 			if (track.id !== this.lastTrackId) {
@@ -93,8 +119,7 @@ class SpotifyState {
 				trackChanged = true;
 				isLiked = false;
 
-				if (wasPlaying) {
-					this.playingGraceUntil = Date.now() + PLAYING_GRACE_MS;
+				if (wasPlaying && spotifyLocalClient.wasRecentSkipTransport(TRANSPORT_PLAYING_GRACE_MS)) {
 					this.lastWasPlaying = true;
 					track = { ...track, isPlaying: true };
 				}
@@ -138,13 +163,63 @@ class SpotifyState {
 		if (trackChanged && track) {
 			void spotifyLocalClient.refreshArtwork();
 			void this.enrichIsLiked(track);
-		} else if (artChanged && track) {
-			void spotifyLocalClient.refreshArtwork();
+		} else if (playingChanged && track) {
+			this.scheduleLikeRefreshOnPlayingChange(track);
 		}
+	}
+
+	private startLikeSyncTimer(): void {
+		this.stopLikeSyncTimer();
+		this.likeSyncTimer = setInterval(() => {
+			const track = this.currentState.track;
+			if (!track || this.likeSyncRefs === 0) {
+				return;
+			}
+			if (Date.now() < this.likeSkipUntil) {
+				return;
+			}
+			void this.enrichIsLiked(track);
+		}, LIKE_SYNC_INTERVAL_MS);
+	}
+
+	private stopLikeSyncTimer(): void {
+		if (this.likeSyncTimer) {
+			clearInterval(this.likeSyncTimer);
+			this.likeSyncTimer = null;
+		}
+		if (this.likePlayingDebounce) {
+			clearTimeout(this.likePlayingDebounce);
+			this.likePlayingDebounce = null;
+		}
+	}
+
+	private scheduleLikeRefreshOnPlayingChange(track: SpotifyTrack): void {
+		if (this.likeSyncRefs === 0) {
+			return;
+		}
+		if (Date.now() < this.likeSkipUntil) {
+			return;
+		}
+
+		if (this.likePlayingDebounce) {
+			clearTimeout(this.likePlayingDebounce);
+		}
+
+		this.likePlayingDebounce = setTimeout(() => {
+			this.likePlayingDebounce = null;
+			if (track.id !== this.lastTrackId || !this.currentState.track) {
+				return;
+			}
+			void this.enrichIsLiked(this.currentState.track);
+		}, LIKE_PLAYING_DEBOUNCE_MS);
 	}
 
 	private async enrichIsLiked(track: SpotifyTrack): Promise<void> {
 		const trackId = track.id;
+		if (Date.now() < this.likeSkipUntil) {
+			return;
+		}
+
 		const isLiked = await this.fetchIsLiked(track);
 		if (trackId !== this.lastTrackId || !this.currentState.track) {
 			return;
@@ -170,9 +245,20 @@ class SpotifyState {
 		}
 	}
 
+	setPlayingOptimistic(isPlaying: boolean): void {
+		if (!this.currentState.track) return;
+		if (this.currentState.track.isPlaying === isPlaying) return;
+		this.playingOptimisticUntil = Date.now() + PLAYING_OPTIMISTIC_HOLD_MS;
+		this.lastWasPlaying = isPlaying;
+		const track = { ...this.currentState.track, isPlaying };
+		this.currentState = { ...this.currentState, track };
+		this.emit(this.currentState);
+	}
+
 	setLikedOptimistic(isLiked: boolean): void {
 		if (!this.currentState.track) return;
 		if (this.currentState.isLiked === isLiked) return;
+		this.likeSkipUntil = Date.now() + LIKE_SKIP_AFTER_TOGGLE_MS;
 		this.currentState = { ...this.currentState, isLiked };
 		this.emit(this.currentState);
 	}

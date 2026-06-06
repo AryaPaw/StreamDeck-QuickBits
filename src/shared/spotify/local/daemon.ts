@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import streamDeck from "@elgato/streamdeck";
+import { getPluginRoot, resolveArtworkPath } from "../plugin-paths";
 import type { DaemonCommandName, DaemonOutboundEvent, SpotifyLocalState, StateListener } from "./types";
 
 const HELPER_NAME = "QuickbitsHelper.exe";
@@ -11,18 +11,8 @@ const MAX_RESTART_ATTEMPTS = 3;
 const RESTART_BACKOFF_MS = 2000;
 const COMMAND_TIMEOUT_MS = 3000;
 
-function getPluginRoot(): string {
-	const currentDir = dirname(fileURLToPath(import.meta.url));
-	return join(currentDir, "..");
-}
-
 function getHelperPath(): string {
 	return join(getPluginRoot(), "helper", HELPER_NAME);
-}
-
-function resolveArtworkPath(relativePath: string): string {
-	const absolute = join(getPluginRoot(), relativePath);
-	return existsSync(absolute) ? absolute : relativePath;
 }
 
 function trackArtKey(title: string, artist: string, album: string): string {
@@ -42,6 +32,7 @@ export class SpotifyLocalDaemon {
 		trackKey: string;
 		artworkPath: string;
 	} | null = null;
+	private lastSkipTransportAt = 0;
 
 	subscribe(listener: StateListener): () => void {
 		this.listeners.add(listener);
@@ -57,19 +48,32 @@ export class SpotifyLocalDaemon {
 		};
 	}
 
-	async sendCommand(cmd: DaemonCommandName): Promise<boolean> {
-		await this.ensureStarted();
-		if (!this.process?.stdin.writable) {
-			return false;
-		}
+	markSkipTransport(): void {
+		this.lastSkipTransportAt = Date.now();
+	}
 
-		const id = ++this.commandId;
+	wasRecentSkipTransport(withinMs = 500): boolean {
+		return Date.now() - this.lastSkipTransportAt < withinMs;
+	}
+
+	async sendCommand(cmd: DaemonCommandName): Promise<boolean> {
 		const isTransport =
 			cmd === "play" ||
 			cmd === "pause" ||
 			cmd === "togglePlayPause" ||
 			cmd === "next" ||
 			cmd === "previous";
+
+		if (cmd === "next" || cmd === "previous") {
+			this.markSkipTransport();
+		}
+
+		await this.ensureStarted();
+		if (!this.process?.stdin.writable) {
+			return false;
+		}
+
+		const id = ++this.commandId;
 
 		return new Promise<boolean>((resolve, reject) => {
 			const timeout = setTimeout(() => {
@@ -174,19 +178,20 @@ export class SpotifyLocalDaemon {
 		}
 
 		if (track.artworkPath) {
+			const resolved = resolveArtworkPath(track.artworkPath);
 			return {
 				...state,
 				currentTrack: {
 					...track,
-					artworkPath: resolveArtworkPath(track.artworkPath)
+					artworkPath: resolved ?? track.artworkPath
 				}
 			};
 		}
 
-		return this.mergeArtwork(state);
+		return this.mergeArtworkFallback(state);
 	}
 
-	private mergeArtwork(state: SpotifyLocalState): SpotifyLocalState {
+	private mergeArtworkFallback(state: SpotifyLocalState): SpotifyLocalState {
 		const track = state.currentTrack;
 		if (!track || !this.cachedArtwork) {
 			return state;
@@ -246,7 +251,7 @@ export class SpotifyLocalDaemon {
 		if (event.event === "artwork") {
 			this.cachedArtwork = {
 				trackKey: trackArtKey(event.title, event.artist, event.album),
-				artworkPath: resolveArtworkPath(event.artworkPath)
+				artworkPath: resolveArtworkPath(event.artworkPath) ?? event.artworkPath
 			};
 			if (this.lastState) {
 				this.emitState(this.lastState);

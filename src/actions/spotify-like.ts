@@ -24,12 +24,14 @@ export class SpotifyLikeAction extends SingletonAction {
 		this.currentAction = ev.action;
 		await loadSpotifySettings();
 		await ev.action.setTitle("");
+		spotifyState.registerLikeSync();
 		this.unsubscribe = spotifyState.subscribe((state) => this.onStateChange(state));
 	}
 
 	override async onWillDisappear(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = null;
+		spotifyState.unregisterLikeSync();
 	}
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {

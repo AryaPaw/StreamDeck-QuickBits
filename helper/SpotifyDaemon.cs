@@ -30,7 +30,9 @@ internal sealed class SpotifyDaemon
     private Timer? _pollTimer;
     private readonly Timer?[] _artworkRetryTimers = new Timer?[ArtworkRetryDelaysMs.Length];
     private bool _running = true;
-    private int _pollIntervalMs = 3000;
+    private const int PlayingPollIntervalMs = 1000;
+    private const int PausedPollIntervalMs = 750;
+    private int _pollIntervalMs = PausedPollIntervalMs;
     private int _errorBackoffMs;
     private SpotifyLocalStatePayload? _lastState;
     private SpotifyLocalStatePayload? _lastGoodState;
@@ -269,7 +271,7 @@ internal sealed class SpotifyDaemon
         {
             _ = OnMediaPropertiesChangedAsync();
         };
-        session.PlaybackInfoChanged += (_, _) => ScheduleStateEmitDebounced();
+        session.PlaybackInfoChanged += (_, _) => _ = EmitPlaybackStateAsync();
         session.TimelinePropertiesChanged += (_, _) => ScheduleStateEmitDebounced();
     }
 
@@ -365,6 +367,25 @@ internal sealed class SpotifyDaemon
         }
     }
 
+    private async Task EmitPlaybackStateAsync()
+    {
+        try
+        {
+            var session = await GetOrRefreshSessionAsync();
+            if (session == null)
+            {
+                return;
+            }
+
+            var mediaProps = await session.TryGetMediaPropertiesAsync();
+            await EmitStateFromSessionAsync(session, mediaProps, force: true);
+        }
+        catch (Exception ex)
+        {
+            WriteEvent(new { @event = "error", message = ex.Message });
+        }
+    }
+
     private async Task EmitStateAsync(bool force = false)
     {
         await _stateEmitLock.WaitAsync(_cts.Token);
@@ -372,22 +393,9 @@ internal sealed class SpotifyDaemon
         try
         {
             var state = await BuildStateAsync();
-            lock (_gate)
+            if (!CommitState(state, force))
             {
-                _errorBackoffMs = 0;
-                _pollIntervalMs = state.Player.State == "playing" ? 1000 : 3000;
-
-                if (!force && StatesEqual(_lastState, state))
-                {
-                    SchedulePoll(0);
-                    return;
-                }
-
-                _lastState = state;
-                if (state.IsRunning && state.CurrentTrack != null)
-                {
-                    _lastGoodState = state;
-                }
+                return;
             }
 
             WriteEvent(new { @event = "state", payload = state });
@@ -463,7 +471,9 @@ internal sealed class SpotifyDaemon
                     Directory.CreateDirectory(cacheDir);
                 }
 
-                await File.WriteAllBytesAsync(cachePath, artworkBytes);
+                var tempPath = cachePath + ".tmp";
+                await File.WriteAllBytesAsync(tempPath, artworkBytes);
+                File.Move(tempPath, cachePath, overwrite: true);
 
                 _lastArtworkKey = artworkKey;
                 WriteEvent(new
@@ -503,22 +513,9 @@ internal sealed class SpotifyDaemon
         try
         {
             var state = BuildStateFromSession(session, mediaProps);
-            lock (_gate)
+            if (!CommitState(state, force))
             {
-                _errorBackoffMs = 0;
-                _pollIntervalMs = state.Player.State == "playing" ? 1000 : 3000;
-
-                if (!force && StatesEqual(_lastState, state))
-                {
-                    SchedulePoll(0);
-                    return;
-                }
-
-                _lastState = state;
-                if (state.IsRunning && state.CurrentTrack != null)
-                {
-                    _lastGoodState = state;
-                }
+                return;
             }
 
             WriteEvent(new { @event = "state", payload = state });
@@ -528,6 +525,29 @@ internal sealed class SpotifyDaemon
         {
             _stateEmitLock.Release();
         }
+    }
+
+    private bool CommitState(SpotifyLocalStatePayload state, bool force)
+    {
+        lock (_gate)
+        {
+            _errorBackoffMs = 0;
+            _pollIntervalMs = state.Player.State == "playing" ? PlayingPollIntervalMs : PausedPollIntervalMs;
+
+            if (!force && StatesEqual(_lastState, state))
+            {
+                SchedulePoll(0);
+                return false;
+            }
+
+            _lastState = state;
+            if (state.IsRunning && state.CurrentTrack != null)
+            {
+                _lastGoodState = state;
+            }
+        }
+
+        return true;
     }
 
     private static string BuildArtworkKey(string title, string artist, string album)

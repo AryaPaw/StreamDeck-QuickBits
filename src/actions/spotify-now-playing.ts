@@ -1,6 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
 	action,
 	KeyDownEvent,
@@ -8,18 +5,22 @@ import {
 	WillAppearEvent
 } from "@elgato/streamdeck";
 import {
+	buildOverlayFromBase64,
+	buildPausedOverlay,
+	buildPlayingImage,
+	prebuildPausedOverlay,
+	resolveTrackArtPath
+} from "../shared/spotify/artwork-overlay";
+import {
 	spotifyLocalClient,
 	spotifyState,
-	SpotifyPlaybackState
+	SpotifyPlaybackState,
+	SpotifyTrack
 } from "../shared/spotify";
 
 const PLACEHOLDER_IMAGE = "imgs/actions/spotify/key";
-
-const PLAY_OVERLAY = `<svg width="144" height="144" viewBox="0 0 144 144" fill="none" xmlns="http://www.w3.org/2000/svg">
-<path d="M72 120C98.5097 120 120 98.5097 120 72C120 45.4903 98.5097 24 72 24C45.4903 24 24 45.4903 24 72C24 98.5097 45.4903 120 72 120Z" fill="black" fill-opacity="0.6"/>
-<path d="M58 50L96 72L58 94V50Z" fill="white"/>
-</svg>
-`;
+const OVERLAY_PAUSE_DEBOUNCE_MS = 500;
+const PLAYING_GUARD_MS = 800;
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-now-playing" })
 export class SpotifyNowPlayingAction extends SingletonAction {
@@ -29,6 +30,10 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	private cachedArtKey: string | null = null;
 	private cachedOverlayImage: string | null = null;
 	private cachedIsPlaying: boolean | null = null;
+	private displayedIsPlaying = false;
+	private pauseOverlayTimer: ReturnType<typeof setTimeout> | null = null;
+	private optimisticUntil = 0;
+	private playingGuardUntil = 0;
 
 	override async onWillAppear(ev: WillAppearEvent): Promise<void> {
 		this.currentAction = ev.action;
@@ -36,14 +41,38 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	}
 
 	override async onWillDisappear(): Promise<void> {
+		this.clearPauseOverlayTimer();
 		this.unsubscribe?.();
 		this.unsubscribe = null;
 	}
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
+		const { track } = spotifyState.getState();
+		if (!track) {
+			await ev.action.showAlert();
+			return;
+		}
+
+		const nextPlaying = !track.isPlaying;
+		this.optimisticUntil = Date.now() + 2_000;
+		this.clearPauseOverlayTimer();
+		this.playingGuardUntil = nextPlaying ? Date.now() + PLAYING_GUARD_MS : 0;
+		spotifyState.setPlayingOptimistic(nextPlaying);
+		await this.applyDisplay(track, nextPlaying);
+
 		const success = await spotifyLocalClient.togglePlayPause();
 		if (!success) {
+			this.playingGuardUntil = track.isPlaying ? Date.now() + PLAYING_GUARD_MS : 0;
+			spotifyState.setPlayingOptimistic(track.isPlaying);
+			await this.applyDisplay(track, track.isPlaying);
 			await ev.action.showAlert();
+		}
+	}
+
+	private clearPauseOverlayTimer(): void {
+		if (this.pauseOverlayTimer) {
+			clearTimeout(this.pauseOverlayTimer);
+			this.pauseOverlayTimer = null;
 		}
 	}
 
@@ -53,10 +82,13 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		const { track } = state;
 
 		if (!track) {
+			this.clearPauseOverlayTimer();
 			this.lastTrackId = null;
 			this.cachedArtKey = null;
 			this.cachedOverlayImage = null;
 			this.cachedIsPlaying = null;
+			this.displayedIsPlaying = false;
+			this.playingGuardUntil = 0;
 			await this.currentAction.setTitle("");
 			await this.currentAction.setImage(PLACEHOLDER_IMAGE);
 			return;
@@ -65,19 +97,76 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		await this.currentAction.setTitle("");
 
 		if (this.lastTrackId !== track.id) {
+			this.clearPauseOverlayTimer();
 			this.lastTrackId = track.id;
 			this.cachedArtKey = null;
 			this.cachedOverlayImage = null;
 			this.cachedIsPlaying = null;
 		}
 
-		const artPath = track.albumArtPath ? this.resolveArtPath(track.albumArtPath) : null;
-		const artKey = `${track.id}:${artPath ?? track.albumArtBase64?.slice(0, 32) ?? ""}:${track.isPlaying}`;
+		if (Date.now() < this.optimisticUntil) {
+			await this.applyDisplay(track, track.isPlaying);
+			return;
+		}
+
+		if (track.isPlaying) {
+			this.clearPauseOverlayTimer();
+			await this.applyDisplay(track, true);
+			return;
+		}
+
+		if (Date.now() < this.playingGuardUntil) {
+			return;
+		}
+
+		if (!this.displayedIsPlaying) {
+			return;
+		}
+
+		this.clearPauseOverlayTimer();
+		this.pauseOverlayTimer = setTimeout(() => {
+			this.pauseOverlayTimer = null;
+			const current = spotifyState.getState().track;
+			if (!current || current.isPlaying) {
+				return;
+			}
+			if (Date.now() < this.playingGuardUntil) {
+				return;
+			}
+			void this.applyDisplay(current, false);
+		}, OVERLAY_PAUSE_DEBOUNCE_MS);
+	}
+
+	private async applyDisplay(track: SpotifyTrack, isPlaying: boolean): Promise<void> {
+		if (this.displayedIsPlaying === isPlaying) {
+			const artPath = resolveTrackArtPath(track.albumArtPath);
+			const artKey = `${track.id}:${artPath ?? track.albumArtBase64?.slice(0, 32) ?? ""}:${isPlaying}`;
+			if (
+				this.cachedArtKey === artKey &&
+				this.cachedOverlayImage !== null &&
+				this.cachedIsPlaying === isPlaying
+			) {
+				return;
+			}
+		}
+
+		await this.renderTrack(track, isPlaying);
+		this.displayedIsPlaying = isPlaying;
+		if (isPlaying) {
+			this.playingGuardUntil = Date.now() + PLAYING_GUARD_MS;
+		}
+	}
+
+	private async renderTrack(track: SpotifyTrack, isPlaying: boolean): Promise<void> {
+		if (!this.currentAction) return;
+
+		const artPath = resolveTrackArtPath(track.albumArtPath);
+		const artKey = `${track.id}:${artPath ?? track.albumArtBase64?.slice(0, 32) ?? ""}:${isPlaying}`;
 
 		if (
 			this.cachedArtKey === artKey &&
 			this.cachedOverlayImage !== null &&
-			this.cachedIsPlaying === track.isPlaying
+			this.cachedIsPlaying === isPlaying
 		) {
 			await this.currentAction.setImage(this.cachedOverlayImage);
 			return;
@@ -88,65 +177,56 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 			return;
 		}
 
-		try {
-			const image = artPath
-				? track.isPlaying
-					? artPath
-					: this.createOverlayImageFromPath(artPath)
-				: this.createOverlayImage(
-						track.albumArtBase64!,
-						track.albumArtMime || "image/jpeg",
-						track.isPlaying
-					);
-
-			this.cachedArtKey = artKey;
-			this.cachedOverlayImage = image;
-			this.cachedIsPlaying = track.isPlaying;
-			await this.currentAction.setImage(image);
-		} catch {
-			if (artPath) {
-				await this.currentAction.setImage(artPath);
+		const image = this.resolveKeyImage(track, artPath, isPlaying);
+		if (!image) {
+			if (this.cachedOverlayImage) {
+				await this.currentAction.setImage(this.cachedOverlayImage);
 			} else {
 				await this.currentAction.setImage(PLACEHOLDER_IMAGE);
 			}
+			return;
+		}
+
+		this.cachedArtKey = artKey;
+		this.cachedOverlayImage = image;
+		this.cachedIsPlaying = isPlaying;
+		await this.currentAction.setImage(image);
+
+		if (artPath && isPlaying) {
+			prebuildPausedOverlay(artPath);
 		}
 	}
 
-	private resolveArtPath(pathOrRelative: string): string | null {
-		if (existsSync(pathOrRelative)) {
-			return pathOrRelative;
+	private resolveKeyImage(
+		track: SpotifyTrack,
+		artPath: string | null,
+		isPlaying: boolean
+	): string | null {
+		if (artPath) {
+			if (isPlaying) {
+				return buildPlayingImage(artPath);
+			}
+
+			const paused = buildPausedOverlay(artPath);
+			if (paused) {
+				return paused;
+			}
+
+			return buildPlayingImage(artPath);
 		}
 
-		const pluginRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-		const absolute = join(pluginRoot, pathOrRelative);
-		return existsSync(absolute) ? absolute : null;
-	}
+		if (track.albumArtBase64) {
+			try {
+				return buildOverlayFromBase64(
+					track.albumArtBase64,
+					track.albumArtMime || "image/jpeg",
+					isPlaying
+				);
+			} catch {
+				return null;
+			}
+		}
 
-	private readArtAsBase64(artPath: string): string {
-		const bytes = readFileSync(artPath);
-		return bytes.toString("base64");
-	}
-
-	private createOverlayImageFromPath(artPath: string): string {
-		const artBase64 = this.readArtAsBase64(artPath);
-		return this.createOverlayImage(artBase64, "image/jpeg", false);
-	}
-
-	private createOverlayImage(base64Album: string, mimeType: string, isPlaying: boolean): string {
-		const overlayPart = isPlaying
-			? ""
-			: `<image xlink:href="data:image/svg+xml;base64,${Buffer.from(PLAY_OVERLAY).toString("base64")}" width="144" height="144"/>`;
-
-		const compositeSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="144" height="144" viewBox="0 0 144 144">
-			<defs>
-				<clipPath id="rounded">
-					<rect width="144" height="144" rx="12"/>
-				</clipPath>
-			</defs>
-			<image xlink:href="data:${mimeType};base64,${base64Album}" width="144" height="144" clip-path="url(#rounded)"/>
-			${overlayPart}
-		</svg>`;
-
-		return `data:image/svg+xml;base64,${Buffer.from(compositeSvg).toString("base64")}`;
+		return null;
 	}
 }

@@ -18,6 +18,10 @@ class SpotifyLocalClient {
 		return spotifyLocalDaemon.sendCommand("refreshArtwork");
 	}
 
+	wasRecentSkipTransport(withinMs?: number): boolean {
+		return spotifyLocalDaemon.wasRecentSkipTransport(withinMs);
+	}
+
 	subscribe(listener: (state: SpotifyLocalState) => void): () => void {
 		return spotifyLocalDaemon.subscribe(listener);
 	}
