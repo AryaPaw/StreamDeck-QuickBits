@@ -13,6 +13,30 @@ alwaysApply: true
 - `dev.aryapaw.quickbits.sdPlugin/ui/` -> Property Inspector with local `sdpi-components.js` (do not replace with npm package).
 - `dev.aryapaw.quickbits.sdPlugin/imgs/` -> action icons (SVG).
 
+## Versioning
+
+- Single source of truth: `Version` in `dev.aryapaw.quickbits.sdPlugin/manifest.json`.
+- On any functional plugin change (actions, Spotify/Skydimo behavior, helper/triggers, PI, manifest actions), bump the patch segment before finishing: `0.1.0.N` -> `0.1.0.N+1`.
+- Docs-only or comment-only edits do not require a version bump unless the user asks.
+- After a version bump, mention the new version in the completion summary.
+
+## Deploy Workflow (mandatory after functional changes)
+
+Finish every functional change with this sequence; do not report "done" until executed or explicitly marked NOT RUN:
+
+1. **Stop locking processes** if helper/daemon rebuild is needed: `streamdeck stop` (or rely on `copy-publish-exe.ps1` kill).
+2. **Build** the affected artifacts:
+   - Full: `bun run build`
+   - Helper only: `bun run build:helper`
+   - Plugin TS only: `bun run build:plugin`
+3. **Bump version** in `manifest.json` when behavior changed (see Versioning).
+4. **Restart Stream Deck plugin** so the new build loads:
+   - `bun run link:deck` (build + restart), or
+   - `streamdeck restart dev.aryapaw.quickbits` after a manual build.
+5. **Confirm** the new `Version` in the completion summary.
+
+Skipping build/restart/version is only acceptable for pure docs/comments; always state NOT RUN + exact commands otherwise.
+
 ## Non-Negotiable Conventions
 
 - ES modules only: use `import.meta.url`; avoid `__dirname`.
@@ -40,19 +64,19 @@ alwaysApply: true
 
 ## Spotify Rules
 
-- Keep centralized state flow via `SpotifyState` (single polling loop, shared subscriptions).
+- **Local-first (Windows):** playback state and transport via `QuickbitsHelper.exe spotify-daemon` (GSMTC / `Windows.Media.Control`), not Spotify Web API.
+- **Web API only for account features:** library like/unlike and track resolution for like; OAuth required for Like action only.
+- Keep centralized state via `SpotifyState` + `spotifyLocalClient` subscriptions; one daemon per plugin lifecycle.
 - Handle token refresh and `401` recovery without duplicating auth logic in each action.
-- Respect `429` backoff behavior; do not add aggressive polling.
-- Required Spotify scopes:
-  - `user-read-playback-state`
-  - `user-modify-playback-state`
-  - `user-read-currently-playing`
+- Respect `429` backoff on Web API calls; do not poll Web API for playback.
+- Windows-only for local Spotify control until macOS phase is explicitly requested.
+- Required Spotify scopes (like/library):
   - `user-library-read`
   - `user-library-modify`
 
 ## Skydimo/Windows Rules
 
 - Trigger apps are foreground WinForms executables; preserve launch expectations (`windowsHide: false` where needed).
-- Keep Skydimo toggle behavior based on persisted `screenSyncActive` setting (not live remote state).
+- Keep Skydimo key state from persisted settings (`lightingMode` + legacy `screenSyncActive`), not live Skydimo state.
 - Helper remains self-contained; avoid changes that reintroduce runtime DLL dependencies.
 - For system-level key simulation flows, do not replace proven `keybd_event` path without explicit request.

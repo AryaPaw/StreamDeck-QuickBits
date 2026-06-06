@@ -4,7 +4,7 @@ import {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
-import { spotifyAPI, getSpotifySettings } from "../shared/spotify";
+import { spotifyLocalClient } from "../shared/spotify";
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-next" })
 export class SpotifyNextAction extends SingletonAction {
@@ -13,9 +13,7 @@ export class SpotifyNextAction extends SingletonAction {
 	}
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
-		const settings = getSpotifySettings();
-		const success = await spotifyAPI.nextTrack(settings);
-
+		const success = await spotifyLocalClient.next();
 		if (!success) {
 			await ev.action.showAlert();
 		}

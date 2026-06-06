@@ -1,23 +1,42 @@
 # Node.js
 node_modules/
+.npm/
+.pnpm-store/
 
-# Stream Deck plugin package (built artifacts)
+# Stream Deck plugin — built / runtime artifacts
 *.sdPlugin/bin/
 *.sdPlugin/logs/
 *.sdPlugin/helper/
 
-# .NET build outputs (helper, triggers, stray marker builds)
+# Spotify artwork cache (runtime, written by GSMTC daemon)
+*.sdPlugin/cache/*
+!*.sdPlugin/cache/.gitkeep
+
+# .NET build outputs (helper, triggers)
 **/bin/
 **/obj/
+**/publish/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
+.vs/
+
+# Local temp / debug scratch files
+tmp-*
+*.tmp
 
 # OS / editor
 .DS_Store
 Thumbs.db
 *.log
+*.swp
+*~
+
+# Env / secrets (never commit)
+.env
+.env.*
+!.env.example
 
 # Lockfiles (optional — remove these lines if you want to track lockfiles)
 bun.lock

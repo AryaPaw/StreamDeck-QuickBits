@@ -35,15 +35,30 @@ export class SpotifyLikeAction extends SingletonAction {
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
 		await loadSpotifySettings();
 		const settings = getSpotifySettings();
-		const result = await spotifyAPI.toggleLike(settings);
 
-		if (result.success) {
-			await ev.action.setTitle("");
-			await this.setLikeImage(ev.action, result.isLiked);
-			await spotifyState.refreshLikedStatus();
+		if (!settings.refreshToken) {
+			await ev.action.showAlert();
 			return;
 		}
-		await ev.action.showAlert();
+
+		const { track, isLiked } = spotifyState.getState();
+		if (!track) {
+			await ev.action.showAlert();
+			return;
+		}
+
+		const newLiked = !isLiked;
+		spotifyState.setLikedOptimistic(newLiked);
+
+		const success = await spotifyAPI.setLike(settings, track, newLiked);
+		if (!success) {
+			spotifyState.setLikedOptimistic(isLiked);
+			await ev.action.showAlert();
+			return;
+		}
+
+		await ev.action.setTitle("");
+		await this.setLikeImage(ev.action, newLiked);
 	}
 
 	private async onStateChange(state: SpotifyPlaybackState): Promise<void> {

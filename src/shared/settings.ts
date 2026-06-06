@@ -4,10 +4,22 @@ export type SetVolumeSettings = {
 
 export type ToggleDndSettings = Record<string, never>;
 
+export type SkydimoLightingMode = "sync" | "static" | "off";
+
 /** Persisted Stream Deck action state: last successful lighting mode chosen via trigger apps */
 export type SkydimoLightingToggleSettings = {
 	screenSyncActive?: boolean;
+	/** Tri-state when set; legacy keys use only screenSyncActive (sync vs static). */
+	lightingMode?: SkydimoLightingMode;
 };
+
+export function normalizeSkydimoLightingMode(settings: SkydimoLightingToggleSettings): SkydimoLightingMode {
+	const m = settings.lightingMode;
+	if (m === "sync" || m === "static" || m === "off") {
+		return m;
+	}
+	return settings.screenSyncActive === true ? "sync" : "static";
+}
 
 const DEFAULT_PERCENT = 30;
 

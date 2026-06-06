@@ -1,9 +1,11 @@
 {
     "scripts": {
-        "build": "bun run build:helper && bun run build:triggers && rollup -c",
-        "build:helper": "dotnet publish helper -c Release && shx cp helper/bin/Release/net8.0-windows/win-x64/publish/QuickbitsHelper.exe dev.aryapaw.quickbits.sdPlugin/helper/",
-        "build:triggers": "dotnet publish triggers/SkydimoTrigger.ScreenSync -c Release && dotnet publish triggers/SkydimoTrigger.ScreenStatic -c Release && shx mkdir -p dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-sync && shx mkdir -p dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-static && shx cp triggers/SkydimoTrigger.ScreenSync/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/SkydimoTrigger.ScreenSync.exe dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-sync/ && shx cp triggers/SkydimoTrigger.ScreenStatic/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/SkydimoTrigger.ScreenStatic.exe dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-static/",
+        "build": "bun run build:helper && bun run build:triggers && bun run build:plugin",
+        "build:helper": "dotnet publish helper -c Release && powershell -ExecutionPolicy Bypass -File scripts/copy-publish-exe.ps1 -Source helper/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/QuickbitsHelper.exe -Dest dev.aryapaw.quickbits.sdPlugin/helper/QuickbitsHelper.exe",
+        "build:triggers": "dotnet publish triggers/SkydimoTrigger.ScreenSync -c Release && dotnet publish triggers/SkydimoTrigger.ScreenStatic -c Release && dotnet publish triggers/SkydimoTrigger.LightingOff -c Release && powershell -ExecutionPolicy Bypass -File scripts/copy-publish-exe.ps1 -Source triggers/SkydimoTrigger.ScreenSync/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/SkydimoTrigger.ScreenSync.exe -Dest dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-sync/SkydimoTrigger.ScreenSync.exe && powershell -ExecutionPolicy Bypass -File scripts/copy-publish-exe.ps1 -Source triggers/SkydimoTrigger.ScreenStatic/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/SkydimoTrigger.ScreenStatic.exe -Dest dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-screen-static/SkydimoTrigger.ScreenStatic.exe && powershell -ExecutionPolicy Bypass -File scripts/copy-publish-exe.ps1 -Source triggers/SkydimoTrigger.LightingOff/bin/Release/net8.0-windows10.0.22621.0/win-x64/publish/SkydimoTrigger.LightingOff.exe -Dest dev.aryapaw.quickbits.sdPlugin/triggers/skydimo-lighting-off/SkydimoTrigger.LightingOff.exe",
         "build:plugin": "rollup -c",
+        "link:deck": "powershell -ExecutionPolicy Bypass -File scripts/switch-streamdeck-link.ps1 -Build -Restart",
+        "link:deck:only": "powershell -ExecutionPolicy Bypass -File scripts/switch-streamdeck-link.ps1",
         "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart dev.aryapaw.quickbits\""
     },
     "type": "module",

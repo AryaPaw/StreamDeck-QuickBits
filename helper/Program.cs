@@ -20,6 +20,7 @@ internal static class Program
             Console.Error.WriteLine("  media-previous");
             Console.Error.WriteLine("  media-info [--source <name>]");
             Console.Error.WriteLine("  media-like");
+            Console.Error.WriteLine("  spotify-daemon [--filter <name>] [--plugin-dir <path>]");
             return 1;
         }
 
@@ -36,6 +37,7 @@ internal static class Program
                 "media-previous" => HandleMediaPrevious(),
                 "media-info" => await HandleMediaInfo(args),
                 "media-like" => HandleMediaLike(),
+                "spotify-daemon" => await HandleSpotifyDaemon(args),
                 _ => UnknownCommand(command)
             };
         }
@@ -132,6 +134,29 @@ internal static class Program
 
         var info = await MediaSession.GetCurrentMediaInfo(sourceFilter);
         Console.WriteLine(JsonSerializer.Serialize(info));
+        return 0;
+    }
+
+    static async Task<int> HandleSpotifyDaemon(string[] args)
+    {
+        var filter = "Spotify";
+        var pluginDir = Directory.GetCurrentDirectory();
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] == "--filter" && i + 1 < args.Length)
+            {
+                filter = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "--plugin-dir" && i + 1 < args.Length)
+            {
+                pluginDir = args[i + 1];
+                i++;
+            }
+        }
+
+        var daemon = new SpotifyDaemon(filter, pluginDir);
+        await daemon.RunAsync();
         return 0;
     }
 

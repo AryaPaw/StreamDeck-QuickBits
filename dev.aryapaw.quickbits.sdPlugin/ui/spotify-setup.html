@@ -56,6 +56,8 @@
 <body>
     <sdpi-wrapper>
         <div class="instructions">
+            <p><strong>Playback</strong> (now playing, play/pause, next/previous) works via the local Spotify desktop app — no API keys required.</p>
+            <p><strong>Like</strong> requires Spotify Web API authorization below.</p>
             <h3>How to get Spotify API credentials:</h3>
             <ol>
                 <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank">developer.spotify.com/dashboard</a></li>
@@ -81,7 +83,7 @@
         </sdpi-item>
 
         <sdpi-item label="">
-            <sdpi-button id="authorize-btn">Authorize with Spotify</sdpi-button>
+            <sdpi-button id="authorize-btn" disabled>Authorize with Spotify</sdpi-button>
         </sdpi-item>
 
         <div id="status" class="status disconnected">
@@ -94,20 +96,21 @@
         const authorizeBtn = document.getElementById('authorize-btn');
         let sdConnection = null;
         let actionInfo = null;
+        let currentSettings = {};
 
         function updateStatus(connected, message) {
             statusEl.className = 'status ' + (connected ? 'connected' : 'disconnected');
             statusEl.textContent = 'Status: ' + message;
         }
 
-        // Connect to Stream Deck
+        function updateAuthorizeButton() {
+            const clientId = (currentSettings.clientId || '').trim();
+            const clientSecret = (currentSettings.clientSecret || '').trim();
+            authorizeBtn.disabled = !clientId || !clientSecret;
+        }
+
         function connectElgatoStreamDeckSocket(inPort, inPropertyInspectorUUID, inRegisterEvent, inInfo, inActionInfo) {
             actionInfo = JSON.parse(inActionInfo);
-
-            // Check if already connected
-            if (actionInfo.payload && actionInfo.payload.settings && actionInfo.payload.settings.refreshToken) {
-                updateStatus(true, 'Connected to Spotify!');
-            }
 
             sdConnection = new WebSocket('ws://127.0.0.1:' + inPort);
 
@@ -126,8 +129,9 @@
                     }
                 }
                 if (data.event === 'didReceiveSettings') {
-                    if (data.payload && data.payload.settings && data.payload.settings.refreshToken) {
-                        updateStatus(true, 'Connected to Spotify!');
+                    if (data.payload && data.payload.settings) {
+                        currentSettings = data.payload.settings;
+                        updateAuthorizeButton();
                     }
                 }
             };

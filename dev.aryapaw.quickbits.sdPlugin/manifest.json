@@ -1,6 +1,6 @@
 {
 	"Name": "QuickBits",
-	"Version": "0.1.0.1",
+	"Version": "0.1.0.5",
 	"Author": "AryaPaw",
 	"Actions": [
 		{
@@ -24,7 +24,7 @@
 			"Name": "Skydimo: lighting (foreground triggers)",
 			"UUID": "dev.aryapaw.quickbits.marker-skydimo-screen-sync",
 			"Icon": "imgs/actions/marker-skydimo-screen-sync/icon",
-			"Tooltip": "Skydimo: Static or Sync via brief foreground trigger apps",
+			"Tooltip": "Skydimo: tap Sync/Static; hold for Off (separate trigger)",
 			"Controllers": ["Keypad"],
 			"States": [
 				{
