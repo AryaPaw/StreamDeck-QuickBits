@@ -5,11 +5,13 @@ import type { SpotifySettings, SpotifyTrack } from "./types";
 
 export class SpotifyAPI {
 	private uriCache = new Map<string, string>();
+	private resolveInFlight = new Map<string, Promise<string | null>>();
 
 	private async requestWithAuth(
 		settings: SpotifySettings,
 		url: string,
-		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> }
+		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> },
+		clearRateLimitOnSuccess = true
 	): Promise<Response | null> {
 		if (spotifyRateLimit.shouldThrottle()) {
 			return null;
@@ -38,7 +40,7 @@ export class SpotifyAPI {
 				return response;
 			}
 
-			if (response.ok || response.status === 204) {
+			if ((response.ok || response.status === 204) && clearRateLimitOnSuccess) {
 				spotifyRateLimit.recordSuccess();
 			}
 
@@ -49,18 +51,18 @@ export class SpotifyAPI {
 		}
 	}
 
-	private async isSavedUri(settings: SpotifySettings, uri: string): Promise<boolean> {
+	private async isSavedUri(settings: SpotifySettings, uri: string): Promise<boolean | null> {
 		const response = await this.requestWithAuth(
 			settings,
 			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`
 		);
-		if (!response) return false;
-		if (response.status === 429) return false;
+		if (!response) return null;
+		if (response.status === 429) return null;
 		if (!response.ok) {
 			streamDeck.logger.error(
 				`[Spotify] isSaved failed: ${response.status} ${await response.text()}`
 			);
-			return false;
+			return null;
 		}
 		const data = (await response.json()) as boolean[];
 		return data[0] || false;
@@ -82,7 +84,89 @@ export class SpotifyAPI {
 		return response.ok;
 	}
 
-	async resolveTrackUri(settings: SpotifySettings, track: SpotifyTrack): Promise<string | null> {
+	private buildSearchQueries(track: SpotifyTrack): string[] {
+		const name = track.name.trim();
+		const artist = track.artist.trim();
+		const album = track.album.trim();
+		const queries: string[] = [];
+
+		if (name && artist) {
+			queries.push(`track:"${name}" artist:"${artist}"`);
+			queries.push(`track:${name} artist:${artist}`);
+		}
+		if (name) {
+			queries.push(`track:"${name}"`);
+		}
+		if (name && album) {
+			queries.push(`track:"${name}" album:"${album}"`);
+		}
+
+		return queries;
+	}
+
+	private async searchTrackUri(
+		settings: SpotifySettings,
+		query: string,
+		reason: string
+	): Promise<string | null> {
+		const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`;
+		const response = await this.requestWithAuth(settings, url, undefined, false);
+		if (!response) {
+			return null;
+		}
+		if (response.status === 429) {
+			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): rate limited`);
+			return null;
+		}
+		if (!response.ok) {
+			streamDeck.logger.error(
+				`[Spotify] resolveTrackUri (${reason}): ${response.status} ${await response.text()}`
+			);
+			return null;
+		}
+
+		try {
+			const data = (await response.json()) as {
+				tracks?: { items?: { uri: string }[] };
+			};
+			return data.tracks?.items?.[0]?.uri ?? null;
+		} catch (e) {
+			streamDeck.logger.error("[Spotify] resolveTrackUri parse error: " + e);
+			return null;
+		}
+	}
+
+	private async resolveTrackUriInner(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		reason: string
+	): Promise<string | null> {
+		const queries = this.buildSearchQueries(track);
+		for (const query of queries) {
+			const uri = await this.searchTrackUri(settings, query, reason);
+			if (uri) {
+				this.uriCache.set(track.id, uri);
+				streamDeck.logger.debug(
+					`[Spotify] resolveTrackUri (${reason}): "${track.name}" -> ${uri} (q=${query})`
+				);
+				return uri;
+			}
+			if (spotifyRateLimit.shouldThrottle()) {
+				break;
+			}
+		}
+
+		streamDeck.logger.warn(
+			`[Spotify] resolveTrackUri (${reason}): no match for "${track.name}" by "${track.artist}"`
+		);
+		return null;
+	}
+
+	async resolveTrackUri(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		reason = "unknown"
+	): Promise<string | null> {
 		if (track.uri.startsWith("spotify:")) {
 			return track.uri;
 		}
@@ -92,46 +176,46 @@ export class SpotifyAPI {
 			return cached;
 		}
 
-		const q = `track:${track.name} artist:${track.artist}`;
-		const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(q)}&type=track&limit=1`;
-		const response = await this.requestWithAuth(settings, url);
-		if (!response?.ok) {
-			return null;
+		const inflight = this.resolveInFlight.get(track.id);
+		if (inflight) {
+			return inflight;
 		}
 
+		const promise = this.resolveTrackUriInner(settings, track, reason);
+		this.resolveInFlight.set(track.id, promise);
 		try {
-			const data = (await response.json()) as {
-				tracks?: { items?: { uri: string }[] };
-			};
-			const uri = data.tracks?.items?.[0]?.uri;
-			if (uri) {
-				this.uriCache.set(track.id, uri);
-			}
-			return uri ?? null;
-		} catch (e) {
-			streamDeck.logger.error("[Spotify] resolveTrackUri parse error: " + e);
-			return null;
+			return await promise;
+		} finally {
+			this.resolveInFlight.delete(track.id);
 		}
 	}
 
-	async isTrackSaved(settings: SpotifySettings, trackUri: string): Promise<boolean> {
+	async isTrackSaved(settings: SpotifySettings, trackUri: string): Promise<boolean | null> {
 		return this.isSavedUri(settings, trackUri);
 	}
 
-	async isEpisodeSaved(settings: SpotifySettings, episodeId: string): Promise<boolean> {
+	async isEpisodeSaved(settings: SpotifySettings, episodeId: string): Promise<boolean | null> {
 		return this.isSavedUri(settings, `spotify:episode:${episodeId}`);
 	}
 
-	async isTrackLiked(settings: SpotifySettings, track: SpotifyTrack): Promise<boolean> {
-		const uri = await this.resolveTrackUri(settings, track);
-		if (!uri || uri.startsWith("spotify:episode:")) {
+	async isTrackLiked(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		reason = "unknown"
+	): Promise<boolean | null> {
+		const uri = await this.resolveTrackUri(settings, track, reason);
+		if (!uri) {
+			return null;
+		}
+		if (uri.startsWith("spotify:episode:")) {
+			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): episode "${track.name}"`);
 			return false;
 		}
 		return this.isTrackSaved(settings, uri);
 	}
 
 	async setLike(settings: SpotifySettings, track: SpotifyTrack, liked: boolean): Promise<boolean> {
-		const uri = await this.resolveTrackUri(settings, track);
+		const uri = await this.resolveTrackUri(settings, track, "toggle-like");
 		if (!uri) {
 			return false;
 		}

@@ -21,9 +21,12 @@ export type SpotifyTrack = {
 	duration: number;
 };
 
+export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavailable";
+
 export type SpotifyPlaybackState = {
 	track: SpotifyTrack | null;
 	isLiked: boolean;
+	likeApiStatus: SpotifyLikeApiStatus;
 };
 
 export type SpotifyPlayingItem = {

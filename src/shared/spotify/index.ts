@@ -1,6 +1,7 @@
 export type {
 	SpotifySettings,
 	SpotifyTrack,
+	SpotifyLikeApiStatus,
 	SpotifyPlaybackState
 } from "./types";
 

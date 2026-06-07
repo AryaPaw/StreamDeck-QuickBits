@@ -12,6 +12,10 @@ class SpotifyRateLimit {
 		return Date.now() < this.blockedUntil;
 	}
 
+	msUntilReady(): number {
+		return Math.max(0, this.blockedUntil - Date.now());
+	}
+
 	record429(scope: string, response: Response): void {
 		this.consecutive429 += 1;
 

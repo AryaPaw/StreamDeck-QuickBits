@@ -14,6 +14,7 @@ import {
 
 const LIKE_IMAGE = "imgs/actions/spotify/like";
 const LIKED_IMAGE = "imgs/actions/spotify/liked";
+const LIKE_API_UNAVAILABLE_IMAGE = "imgs/actions/spotify/like-api-unavailable";
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-like" })
 export class SpotifyLikeAction extends SingletonAction {
@@ -23,7 +24,6 @@ export class SpotifyLikeAction extends SingletonAction {
 	override async onWillAppear(ev: WillAppearEvent): Promise<void> {
 		this.currentAction = ev.action;
 		await loadSpotifySettings();
-		await ev.action.setTitle("");
 		spotifyState.registerLikeSync();
 		this.unsubscribe = spotifyState.subscribe((state) => this.onStateChange(state));
 	}
@@ -37,13 +37,19 @@ export class SpotifyLikeAction extends SingletonAction {
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
 		await loadSpotifySettings();
 		const settings = getSpotifySettings();
+		const state = spotifyState.getState();
 
-		if (!settings.refreshToken) {
+		if (!settings.refreshToken || state.likeApiStatus === "no_auth") {
 			await ev.action.showAlert();
 			return;
 		}
 
-		const { track, isLiked } = spotifyState.getState();
+		if (state.likeApiStatus !== "ok") {
+			await ev.action.showAlert();
+			return;
+		}
+
+		const { track, isLiked } = state;
 		if (!track) {
 			await ev.action.showAlert();
 			return;
@@ -55,21 +61,29 @@ export class SpotifyLikeAction extends SingletonAction {
 		const success = await spotifyAPI.setLike(settings, track, newLiked);
 		if (!success) {
 			spotifyState.setLikedOptimistic(isLiked);
+			spotifyState.refreshLikeApiStatus();
 			await ev.action.showAlert();
 			return;
 		}
 
-		await ev.action.setTitle("");
-		await this.setLikeImage(ev.action, newLiked);
+		await this.renderLikeKey(spotifyState.getState());
 	}
 
 	private async onStateChange(state: SpotifyPlaybackState): Promise<void> {
 		if (!this.currentAction) return;
-		await this.currentAction.setTitle("");
-		await this.setLikeImage(this.currentAction, state.isLiked);
+		await this.renderLikeKey(state);
 	}
 
-	private async setLikeImage(action: WillAppearEvent["action"], isLiked: boolean): Promise<void> {
-		await action.setImage(isLiked ? LIKED_IMAGE : LIKE_IMAGE);
+	private async renderLikeKey(state: SpotifyPlaybackState): Promise<void> {
+		if (!this.currentAction) return;
+
+		await this.currentAction.setTitle("");
+
+		if (state.likeApiStatus !== "ok") {
+			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
+			return;
+		}
+
+		await this.currentAction.setImage(state.isLiked ? LIKED_IMAGE : LIKE_IMAGE);
 	}
 }

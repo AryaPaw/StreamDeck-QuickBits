@@ -1,13 +1,20 @@
-import { getSpotifySettings } from "./settings";
+import streamDeck from "@elgato/streamdeck";
+import { getSpotifySettings, loadSpotifySettings } from "./settings";
 import { spotifyAPI } from "./api";
+import { spotifyRateLimit } from "./rate-limit";
 import { spotifyLocalClient } from "./local/client";
 import { mapLocalStateToTrack } from "./local/map";
 import type { SpotifyLocalState } from "./local/types";
-import type { SpotifyPlaybackState, SpotifyTrack, StateListener } from "./types";
+import type {
+	SpotifyLikeApiStatus,
+	SpotifyPlaybackState,
+	SpotifyTrack,
+	StateListener
+} from "./types";
 
 const TRANSITION_HOLD_MS = 1000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
-const LIKE_SYNC_INTERVAL_MS = 25_000;
+const LIKE_SYNC_INTERVAL_MS = 60_000;
 const LIKE_PLAYING_DEBOUNCE_MS = 3_000;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
 const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
@@ -15,7 +22,11 @@ const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
 class SpotifyState {
 	private listeners: Set<StateListener> = new Set();
 	private unsubscribeLocal: (() => void) | null = null;
-	private currentState: SpotifyPlaybackState = { track: null, isLiked: false };
+	private currentState: SpotifyPlaybackState = {
+		track: null,
+		isLiked: false,
+		likeApiStatus: "ok"
+	};
 	private lastTrackId: string | null = null;
 	private lastTrackAt = 0;
 	private lastWasPlaying = false;
@@ -23,6 +34,8 @@ class SpotifyState {
 	private likeSyncRefs = 0;
 	private likeSyncTimer: ReturnType<typeof setInterval> | null = null;
 	private likePlayingDebounce: ReturnType<typeof setTimeout> | null = null;
+	private likeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private likeRecoveryWatch: ReturnType<typeof setInterval> | null = null;
 	private likeSkipUntil = 0;
 	private playingOptimisticUntil = 0;
 	private localStateChain: Promise<void> = Promise.resolve();
@@ -52,6 +65,17 @@ class SpotifyState {
 		this.likeSyncRefs += 1;
 		if (this.likeSyncRefs === 1) {
 			this.startLikeSyncTimer();
+			this.startLikeApiRecoveryWatch();
+		}
+		this.refreshLikeApiStatus();
+		const track = this.currentState.track;
+		if (!track) {
+			return;
+		}
+		if (this.currentState.likeApiStatus === "ok" && !spotifyRateLimit.shouldThrottle()) {
+			void this.enrichIsLiked(track, "like-button-appear");
+		} else {
+			this.scheduleLikeRetry(track, "like-button-appear");
 		}
 	}
 
@@ -59,6 +83,7 @@ class SpotifyState {
 		this.likeSyncRefs = Math.max(0, this.likeSyncRefs - 1);
 		if (this.likeSyncRefs === 0) {
 			this.stopLikeSyncTimer();
+			this.stopLikeApiRecoveryWatch();
 		}
 	}
 
@@ -119,7 +144,7 @@ class SpotifyState {
 				trackChanged = true;
 				isLiked = false;
 
-				if (wasPlaying && spotifyLocalClient.wasRecentSkipTransport(TRANSPORT_PLAYING_GRACE_MS)) {
+				if (wasPlaying) {
 					this.lastWasPlaying = true;
 					track = { ...track, isPlaying: true };
 				}
@@ -156,13 +181,18 @@ class SpotifyState {
 			metaChanged ||
 			(track === null && hadTrack)
 		) {
-			this.currentState = { track, isLiked };
+			this.currentState = { ...this.currentState, track, isLiked };
 			this.emit(this.currentState);
 		}
 
 		if (trackChanged && track) {
 			void spotifyLocalClient.refreshArtwork();
-			void this.enrichIsLiked(track);
+			if (this.likeSyncRefs > 0 && !this.likeRetryTimer && !spotifyRateLimit.shouldThrottle()) {
+				void this.enrichIsLiked(track, "track-changed");
+			} else if (this.likeSyncRefs > 0) {
+				this.refreshLikeApiStatus();
+				this.scheduleLikeRetry(track, "track-changed");
+			}
 		} else if (playingChanged && track) {
 			this.scheduleLikeRefreshOnPlayingChange(track);
 		}
@@ -175,11 +205,49 @@ class SpotifyState {
 			if (!track || this.likeSyncRefs === 0) {
 				return;
 			}
-			if (Date.now() < this.likeSkipUntil) {
+			if (Date.now() < this.likeSkipUntil || this.likeRetryTimer) {
 				return;
 			}
-			void this.enrichIsLiked(track);
+			if (spotifyRateLimit.shouldThrottle()) {
+				this.updateLikeApiStatus("rate_limited");
+				this.scheduleLikeRetry(track, "interval");
+				return;
+			}
+			void this.enrichIsLiked(track, "interval");
 		}, LIKE_SYNC_INTERVAL_MS);
+	}
+
+	private startLikeApiRecoveryWatch(): void {
+		if (this.likeRecoveryWatch) {
+			return;
+		}
+
+		this.likeRecoveryWatch = setInterval(() => {
+			if (this.likeSyncRefs === 0) {
+				return;
+			}
+			if (this.currentState.likeApiStatus === "ok") {
+				return;
+			}
+			if (spotifyRateLimit.shouldThrottle()) {
+				this.updateLikeApiStatus("rate_limited");
+				return;
+			}
+
+			const track = this.currentState.track;
+			if (!track || this.likedCheckInFlight || this.likeRetryTimer) {
+				return;
+			}
+
+			void this.enrichIsLiked(track, "recovery-watch");
+		}, 5_000);
+	}
+
+	private stopLikeApiRecoveryWatch(): void {
+		if (this.likeRecoveryWatch) {
+			clearInterval(this.likeRecoveryWatch);
+			this.likeRecoveryWatch = null;
+		}
 	}
 
 	private stopLikeSyncTimer(): void {
@@ -191,6 +259,56 @@ class SpotifyState {
 			clearTimeout(this.likePlayingDebounce);
 			this.likePlayingDebounce = null;
 		}
+		if (this.likeRetryTimer) {
+			clearTimeout(this.likeRetryTimer);
+			this.likeRetryTimer = null;
+		}
+		this.stopLikeApiRecoveryWatch();
+	}
+
+	private scheduleLikeRetry(track: SpotifyTrack, reason: string): void {
+		if (this.likeSyncRefs === 0 || this.likeRetryTimer) {
+			return;
+		}
+
+		const delay = Math.max(2_000, spotifyRateLimit.msUntilReady() + 1_000);
+
+		streamDeck.logger.info(
+			`[Spotify] Like check retry (${reason}) for "${track.name}" in ${Math.ceil(delay / 1000)}s`
+		);
+
+		this.likeRetryTimer = setTimeout(() => {
+			this.likeRetryTimer = null;
+			const current = this.currentState.track;
+			if (!current || current.id !== track.id || this.likeSyncRefs === 0) {
+				return;
+			}
+			void this.enrichIsLiked(current, `${reason}-retry`);
+		}, delay);
+	}
+
+	private probeLikeApiStatus(): SpotifyLikeApiStatus {
+		const settings = getSpotifySettings();
+		if (!settings.refreshToken) {
+			return "no_auth";
+		}
+		if (spotifyRateLimit.shouldThrottle()) {
+			return "rate_limited";
+		}
+		return "ok";
+	}
+
+	private updateLikeApiStatus(status: SpotifyLikeApiStatus): void {
+		if (this.currentState.likeApiStatus === status) {
+			return;
+		}
+		streamDeck.logger.info(`[Spotify] Like API status -> ${status}`);
+		this.currentState = { ...this.currentState, likeApiStatus: status };
+		this.emit(this.currentState);
+	}
+
+	refreshLikeApiStatus(): void {
+		this.updateLikeApiStatus(this.probeLikeApiStatus());
 	}
 
 	private scheduleLikeRefreshOnPlayingChange(track: SpotifyTrack): void {
@@ -210,36 +328,68 @@ class SpotifyState {
 			if (track.id !== this.lastTrackId || !this.currentState.track) {
 				return;
 			}
-			void this.enrichIsLiked(this.currentState.track);
+			void this.enrichIsLiked(this.currentState.track, "playing-changed");
 		}, LIKE_PLAYING_DEBOUNCE_MS);
 	}
 
-	private async enrichIsLiked(track: SpotifyTrack): Promise<void> {
+	private async enrichIsLiked(track: SpotifyTrack, reason: string): Promise<void> {
 		const trackId = track.id;
 		if (Date.now() < this.likeSkipUntil) {
+			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): recent toggle`);
+			return;
+		}
+		if (this.likedCheckInFlight) {
+			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): request in flight`);
 			return;
 		}
 
-		const isLiked = await this.fetchIsLiked(track);
+		await loadSpotifySettings();
+		const authStatus = this.probeLikeApiStatus();
+		if (authStatus !== "ok") {
+			this.updateLikeApiStatus(authStatus);
+			this.scheduleLikeRetry(track, reason);
+			return;
+		}
+
+		const isLiked = await this.fetchIsLiked(track, reason);
+		if (isLiked === null) {
+			this.updateLikeApiStatus(
+				spotifyRateLimit.shouldThrottle() ? "rate_limited" : "unavailable"
+			);
+			this.scheduleLikeRetry(track, reason);
+			return;
+		}
 		if (trackId !== this.lastTrackId || !this.currentState.track) {
 			return;
 		}
+
+		this.updateLikeApiStatus("ok");
+
 		if (this.currentState.isLiked === isLiked) {
+			streamDeck.logger.debug(
+				`[Spotify] Like check (${reason}): "${track.name}" unchanged (${isLiked ? "liked" : "not liked"})`
+			);
 			return;
 		}
+		streamDeck.logger.info(
+			`[Spotify] Like check (${reason}): "${track.name}" -> ${isLiked ? "liked" : "not liked"}`
+		);
 		this.currentState = { ...this.currentState, isLiked };
 		this.emit(this.currentState);
 	}
 
-	private async fetchIsLiked(track: SpotifyTrack): Promise<boolean> {
+	private async fetchIsLiked(track: SpotifyTrack, reason: string): Promise<boolean | null> {
 		const settings = getSpotifySettings();
-		if (!settings.refreshToken || this.likedCheckInFlight) {
-			return false;
+		if (!settings.refreshToken) {
+			streamDeck.logger.warn(
+				`[Spotify] Like check failed (${reason}): no refresh token - open Spotify Setup and authorize`
+			);
+			return null;
 		}
 
 		this.likedCheckInFlight = true;
 		try {
-			return await spotifyAPI.isTrackLiked(settings, track);
+			return await spotifyAPI.isTrackLiked(settings, track, reason);
 		} finally {
 			this.likedCheckInFlight = false;
 		}

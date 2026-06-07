@@ -21,6 +21,7 @@ import {
 const PLACEHOLDER_IMAGE = "imgs/actions/spotify/key";
 const OVERLAY_PAUSE_DEBOUNCE_MS = 500;
 const PLAYING_GUARD_MS = 800;
+const TRACK_TRANSITION_MS = 2_000;
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-now-playing" })
 export class SpotifyNowPlayingAction extends SingletonAction {
@@ -30,10 +31,12 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	private cachedArtKey: string | null = null;
 	private cachedOverlayImage: string | null = null;
 	private cachedIsPlaying: boolean | null = null;
+	private heldOverlayImage: string | null = null;
 	private displayedIsPlaying = false;
 	private pauseOverlayTimer: ReturnType<typeof setTimeout> | null = null;
 	private optimisticUntil = 0;
 	private playingGuardUntil = 0;
+	private trackTransitionUntil = 0;
 
 	override async onWillAppear(ev: WillAppearEvent): Promise<void> {
 		this.currentAction = ev.action;
@@ -76,6 +79,22 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		}
 	}
 
+	private beginTrackTransition(): void {
+		this.trackTransitionUntil = Date.now() + TRACK_TRANSITION_MS;
+		this.clearPauseOverlayTimer();
+		this.displayedIsPlaying = true;
+		this.playingGuardUntil = Date.now() + PLAYING_GUARD_MS;
+		if (this.cachedOverlayImage) {
+			this.heldOverlayImage = this.cachedOverlayImage;
+		}
+		this.cachedArtKey = null;
+		this.cachedIsPlaying = null;
+	}
+
+	private isInTrackTransition(): boolean {
+		return Date.now() < this.trackTransitionUntil;
+	}
+
 	private async onStateChange(state: SpotifyPlaybackState): Promise<void> {
 		if (!this.currentAction) return;
 
@@ -87,8 +106,10 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 			this.cachedArtKey = null;
 			this.cachedOverlayImage = null;
 			this.cachedIsPlaying = null;
+			this.heldOverlayImage = null;
 			this.displayedIsPlaying = false;
 			this.playingGuardUntil = 0;
+			this.trackTransitionUntil = 0;
 			await this.currentAction.setTitle("");
 			await this.currentAction.setImage(PLACEHOLDER_IMAGE);
 			return;
@@ -97,11 +118,8 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		await this.currentAction.setTitle("");
 
 		if (this.lastTrackId !== track.id) {
-			this.clearPauseOverlayTimer();
 			this.lastTrackId = track.id;
-			this.cachedArtKey = null;
-			this.cachedOverlayImage = null;
-			this.cachedIsPlaying = null;
+			this.beginTrackTransition();
 		}
 
 		if (Date.now() < this.optimisticUntil) {
@@ -109,7 +127,7 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 			return;
 		}
 
-		if (track.isPlaying) {
+		if (track.isPlaying || this.isInTrackTransition()) {
 			this.clearPauseOverlayTimer();
 			await this.applyDisplay(track, true);
 			return;
@@ -130,7 +148,7 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 			if (!current || current.isPlaying) {
 				return;
 			}
-			if (Date.now() < this.playingGuardUntil) {
+			if (Date.now() < this.playingGuardUntil || this.isInTrackTransition()) {
 				return;
 			}
 			void this.applyDisplay(current, false);
@@ -173,12 +191,20 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		}
 
 		if (!artPath && !track.albumArtBase64) {
+			if (this.heldOverlayImage) {
+				await this.currentAction.setImage(this.heldOverlayImage);
+				return;
+			}
 			await this.currentAction.setImage(PLACEHOLDER_IMAGE);
 			return;
 		}
 
 		const image = this.resolveKeyImage(track, artPath, isPlaying);
 		if (!image) {
+			if (this.heldOverlayImage) {
+				await this.currentAction.setImage(this.heldOverlayImage);
+				return;
+			}
 			if (this.cachedOverlayImage) {
 				await this.currentAction.setImage(this.cachedOverlayImage);
 			} else {
@@ -190,6 +216,7 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		this.cachedArtKey = artKey;
 		this.cachedOverlayImage = image;
 		this.cachedIsPlaying = isPlaying;
+		this.heldOverlayImage = image;
 		await this.currentAction.setImage(image);
 
 		if (artPath && isPlaying) {

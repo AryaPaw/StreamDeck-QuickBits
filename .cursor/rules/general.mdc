@@ -62,6 +62,29 @@ Skipping build/restart/version is only acceptable for pure docs/comments; always
 - Prefer updating key image/title intentionally (`setImage`, `setTitle`) instead of ad-hoc UI mutations.
 - Preserve settings persistence behavior in Property Inspector (`setting` attribute contract).
 
+## Destructive / User-Data Safety
+
+Before ANY action that can modify the user's real data (Spotify library like/unlike, file deletion, git destructive ops, helper commands with side effects), show this block in chat and wait for explicit confirmation unless the user already requested that exact action:
+
+```
+----------
+ВНИМАНИЕ
+----------
+<что именно будет изменено, какие команды/кнопки, риск отката>
+```
+
+- **Never** toggle Spotify like/unlike, skip tracks, or run transport commands against the user's live library for debugging unless they explicitly ask.
+- Prefer read-only diagnosis: code inspection, `streamDeck.logger` output, GET-only Web API checks only when user approves.
+- If a test must touch user data, name the exact track/action and offer a safer alternative first.
+
+## Spotify Debugging
+
+- Plugin logs via `streamDeck.logger` land in the **plugin log file**, not the main Stream Deck app log.
+- Windows plugin log: `%APPDATA%\Elgato\StreamDeck\Plugins\dev.aryapaw.quickbits.sdPlugin\logs\dev.aryapaw.quickbits.0.log`
+- Main Stream Deck app log (SDK connect/restart only): `%APPDATA%\Elgato\StreamDeck\Logs\StreamDeck.log`
+- Filter plugin log for `[Spotify]` - like sync reasons: `track-changed`, `like-button-appear`, `interval`, `playing-changed`, `*-retry`.
+- Like flow: GSMTC title/artist -> Web API search -> `me/library/contains`. Common failures: `rate limited (429)`, `request blocked or failed`, `no refresh token`.
+
 ## Spotify Rules
 
 - **Local-first (Windows):** playback state and transport via `QuickbitsHelper.exe spotify-daemon` (GSMTC / `Windows.Media.Control`), not Spotify Web API.
