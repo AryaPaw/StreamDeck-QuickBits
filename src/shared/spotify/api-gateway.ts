@@ -1,12 +1,9 @@
 import streamDeck from "@elgato/streamdeck";
 import { spotifyAuth } from "./auth";
 import { spotifyApiMetrics, type ApiTrackContext } from "./api-metrics";
+import { SPOTIFY_WEB_API_LIMITS } from "./limits";
 import { spotifyRateLimit } from "./rate-limit";
 import type { SpotifySettings } from "./types";
-
-const QUOTA_WINDOW_MS = 30_000;
-const SEARCH_QUOTA = 8;
-const LIBRARY_QUOTA = 12;
 
 export type ApiRequestPriority = "manual" | "normal" | "background";
 
@@ -15,11 +12,13 @@ export type ApiGatewayOptions = {
 	headers?: Record<string, string>;
 	priority?: ApiRequestPriority;
 	reason?: string;
+	bypassQuota?: boolean;
+	/** @deprecated use bypassQuota */
 	bypassLibraryThrottle?: boolean;
 	track?: ApiTrackContext;
 };
 
-function bucketForUrl(url: string): "search" | "library" {
+function endpointBucket(url: string): "search" | "library" {
 	return url.includes("/search") ? "search" : "library";
 }
 
@@ -33,60 +32,54 @@ function endpointLabel(url: string): string {
 }
 
 class SpotifyApiGateway {
-	private searchWindow: number[] = [];
-	private libraryWindow: number[] = [];
+	private requestTimestamps: number[] = [];
 	private inflight = new Map<string, Promise<Response | null>>();
 
-	private trimWindow(window: number[]): void {
-		const cutoff = Date.now() - QUOTA_WINDOW_MS;
-		while (window.length > 0 && window[0]! < cutoff) {
-			window.shift();
+	private trimWindow(): void {
+		const cutoff = Date.now() - SPOTIFY_WEB_API_LIMITS.windowMs;
+		while (this.requestTimestamps.length > 0 && this.requestTimestamps[0]! < cutoff) {
+			this.requestTimestamps.shift();
 		}
 	}
 
-	private countInWindow(window: number[]): number {
-		this.trimWindow(window);
-		return window.length;
+	private countInWindow(): number {
+		this.trimWindow();
+		return this.requestTimestamps.length;
 	}
 
-	private recordQuotaUse(bucket: "search" | "library"): void {
-		const window = bucket === "search" ? this.searchWindow : this.libraryWindow;
-		window.push(Date.now());
+	private recordQuotaUse(): void {
+		this.requestTimestamps.push(Date.now());
 	}
 
-	private isQuotaExceeded(bucket: "search" | "library"): boolean {
-		const limit = bucket === "search" ? SEARCH_QUOTA : LIBRARY_QUOTA;
-		const window = bucket === "search" ? this.searchWindow : this.libraryWindow;
-		return this.countInWindow(window) >= limit;
+	private isQuotaExceeded(): boolean {
+		return this.countInWindow() >= spotifyRateLimit.getRequestLimit();
 	}
 
-	getRollingCounts(): { search: number; library: number } {
+	getRollingCounts(): { total: number; limit: number } {
 		return {
-			search: this.countInWindow(this.searchWindow),
-			library: this.countInWindow(this.libraryWindow)
+			total: this.countInWindow(),
+			limit: spotifyRateLimit.getRequestLimit()
 		};
 	}
 
-	getQuotas(): { search: number; library: number } {
-		return { search: SEARCH_QUOTA, library: LIBRARY_QUOTA };
+	private shouldBypassQuota(options: ApiGatewayOptions): boolean {
+		return (
+			options.bypassQuota === true ||
+			options.bypassLibraryThrottle === true ||
+			options.priority === "manual"
+		);
 	}
 
-	private shouldBlockProactive(url: string, options: ApiGatewayOptions): "blocked" | "quota" | null {
-		const bucket = bucketForUrl(url);
-		const bypass = options.bypassLibraryThrottle === true || options.priority === "manual";
-
-		if (bucket === "search" && spotifyRateLimit.shouldThrottleSearch()) {
-			return "blocked";
-		}
-		if (bucket === "library" && !bypass && spotifyRateLimit.shouldThrottleLibrary()) {
+	private shouldBlockProactive(options: ApiGatewayOptions): "blocked" | "quota" | null {
+		if (spotifyRateLimit.shouldThrottle()) {
 			return "blocked";
 		}
 
-		if (bypass) {
+		if (this.shouldBypassQuota(options)) {
 			return null;
 		}
 
-		if (this.isQuotaExceeded(bucket)) {
+		if (this.isQuotaExceeded()) {
 			return "quota";
 		}
 
@@ -99,7 +92,7 @@ class SpotifyApiGateway {
 		options: ApiGatewayOptions = {}
 	): Promise<Response | null> {
 		const method = options.method ?? "GET";
-		const bucket = bucketForUrl(url);
+		const bucket = endpointBucket(url);
 		const endpoint = endpointLabel(url);
 		const reason = options.reason ?? "unknown";
 		const dedupeKey = `${method}:${url}`;
@@ -117,7 +110,7 @@ class SpotifyApiGateway {
 			return existing;
 		}
 
-		const blockReason = this.shouldBlockProactive(url, options);
+		const blockReason = this.shouldBlockProactive(options);
 		if (blockReason) {
 			spotifyApiMetrics.record({
 				kind: blockReason === "quota" ? "skipped" : "blocked",
@@ -133,7 +126,13 @@ class SpotifyApiGateway {
 			return null;
 		}
 
-		const promise = this.executeRequest(settings, url, { ...options, method, reason, bucket, endpoint });
+		const promise = this.executeRequest(settings, url, {
+			...options,
+			method,
+			reason,
+			bucket,
+			endpoint
+		});
 		this.inflight.set(dedupeKey, promise);
 		try {
 			return await promise;
@@ -154,7 +153,7 @@ class SpotifyApiGateway {
 			endpoint: string;
 		}
 	): Promise<Response | null> {
-		this.recordQuotaUse(ctx.bucket);
+		this.recordQuotaUse();
 
 		spotifyApiMetrics.record({
 			kind: "request",

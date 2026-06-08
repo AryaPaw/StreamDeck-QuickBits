@@ -69,8 +69,7 @@ class SpotifyWebServer {
 
 		if (url.pathname === "/debug/api/metrics" && req.method === "GET") {
 			const rolling30s = spotifyApiGateway.getRollingCounts();
-			const quotas = spotifyApiGateway.getQuotas();
-			jsonResponse(res, 200, spotifyApiMetrics.getMetricsSnapshot(rolling30s, quotas));
+			jsonResponse(res, 200, spotifyApiMetrics.getMetricsSnapshot(rolling30s));
 			return;
 		}
 

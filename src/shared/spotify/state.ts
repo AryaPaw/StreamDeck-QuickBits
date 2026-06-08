@@ -19,8 +19,6 @@ const AUTO_ADVANCE_PLAYING_MS = 5_000;
 const PAUSED_CLEAR_MS = 3_000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
-const LIKE_CONTAINS_COOLDOWN_MS = 30_000;
-const LIKE_STARTUP_DELAY_MS = 45_000;
 const MAX_LIKE_RETRIES = 2;
 const MAX_LIKED_CACHE_ENTRIES = 200;
 const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
@@ -45,12 +43,10 @@ class SpotifyState {
 	private autoAdvancePlayingUntil = 0;
 	private likedCheckInFlight = false;
 	private likedResultCache = new Map<string, LikedCacheEntry>();
-	private lastContainsAt = 0;
 	private likeSyncRefs = 0;
 	private likeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private likeRetryCount = 0;
 	private likeRetryTrackId: string | null = null;
-	private likeStartupTimer: ReturnType<typeof setTimeout> | null = null;
 	private likeCacheHydrated = false;
 	private likeSkipUntil = 0;
 	private playingOptimisticUntil = 0;
@@ -102,23 +98,8 @@ class SpotifyState {
 			return;
 		}
 
-		const hadCachedLike = this.applyCachedLikeIfAny(track);
-		if (hadCachedLike) {
-			void this.enrichIsLiked(track, "like-button-appear");
-			return;
-		}
-
-		if (this.likeStartupTimer) {
-			clearTimeout(this.likeStartupTimer);
-		}
-		this.likeStartupTimer = setTimeout(() => {
-			this.likeStartupTimer = null;
-			const current = this.currentState.track;
-			if (!current || this.likeSyncRefs === 0) {
-				return;
-			}
-			void this.enrichIsLiked(current, "like-button-appear");
-		}, LIKE_STARTUP_DELAY_MS);
+		this.applyCachedLikeIfAny(track);
+		void this.enrichIsLiked(track, "like-button-appear");
 	}
 
 	private hydrateLikedCache(settings: SpotifySettings): void {
@@ -174,10 +155,6 @@ class SpotifyState {
 		};
 		this.emit(this.currentState);
 		return true;
-	}
-
-	private canAutoContains(): boolean {
-		return Date.now() - this.lastContainsAt >= LIKE_CONTAINS_COOLDOWN_MS;
 	}
 
 	private applyPlayingGrace(track: SpotifyTrack, local: SpotifyLocalState): SpotifyTrack {
@@ -341,10 +318,6 @@ class SpotifyState {
 			clearTimeout(this.likeRetryTimer);
 			this.likeRetryTimer = null;
 		}
-		if (this.likeStartupTimer) {
-			clearTimeout(this.likeStartupTimer);
-			this.likeStartupTimer = null;
-		}
 	}
 
 	private resetLikeRetryState(trackId: string): void {
@@ -358,13 +331,6 @@ class SpotifyState {
 		if (this.likeSyncRefs === 0 || this.likeRetryTimer) {
 			return;
 		}
-		if (spotifyRateLimit.shouldGiveUpLibrary()) {
-			streamDeck.logger.info(
-				`[Spotify] Like check paused (${reason}) for "${track.name}" - library API in give-up window`
-			);
-			return;
-		}
-
 		this.resetLikeRetryState(track.id);
 		if (this.likeRetryCount >= MAX_LIKE_RETRIES) {
 			streamDeck.logger.info(
@@ -374,7 +340,7 @@ class SpotifyState {
 		}
 		this.likeRetryCount += 1;
 
-		const delay = Math.max(2_000, spotifyRateLimit.msUntilLibraryReady() + 1_000);
+		const delay = Math.max(2_000, spotifyRateLimit.msUntilReady() + 500);
 
 		streamDeck.logger.info(
 			`[Spotify] Like check retry ${this.likeRetryCount}/${MAX_LIKE_RETRIES} (${reason}) for "${track.name}" in ${Math.ceil(delay / 1000)}s`
@@ -398,7 +364,7 @@ class SpotifyState {
 		if (track && this.getCachedLike(track.id)) {
 			return "ok";
 		}
-		if (spotifyRateLimit.shouldThrottleLibrary()) {
+		if (spotifyRateLimit.shouldThrottle()) {
 			return "rate_limited";
 		}
 		return "ok";
@@ -451,29 +417,13 @@ class SpotifyState {
 		const cached = this.getCachedLike(trackId);
 		const uriCached = spotifyAPI.hasCachedUri(trackId);
 
-		if (spotifyRateLimit.shouldGiveUpLibrary()) {
-			spotifyApiMetrics.recordPolicySkip(`${reason}:give-up`, "/me/library/contains", "library", trackCtx);
-			const displayStatus = this.resolveDisplayApiStatus(track, "rate_limited");
-			this.updateLikeApiStatus(displayStatus);
-			if (cached) {
-				this.currentState = {
-					...this.currentState,
-					isLiked: cached.isLiked,
-					likeKnown: true,
-					likeApiStatus: displayStatus
-				};
-				this.emit(this.currentState);
-			}
-			return;
-		}
-
-		if (spotifyRateLimit.shouldThrottleLibrary()) {
+		if (spotifyRateLimit.shouldThrottle()) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:backoff`, "/me/library/contains", "library", trackCtx);
 			const displayStatus = this.resolveDisplayApiStatus(track, "rate_limited");
 			this.updateLikeApiStatus(displayStatus);
 			if (cached) {
 				streamDeck.logger.info(
-					`[Spotify] Using cached like for "${track.name}" (${cached.isLiked ? "liked" : "not liked"}) during library backoff`
+					`[Spotify] Using cached like for "${track.name}" (${cached.isLiked ? "liked" : "not liked"}) during API backoff`
 				);
 				this.currentState = {
 					...this.currentState,
@@ -482,25 +432,6 @@ class SpotifyState {
 					likeApiStatus: displayStatus
 				};
 				this.emit(this.currentState);
-			}
-			this.scheduleLikeRetry(track, reason);
-			return;
-		}
-
-		if (!this.canAutoContains()) {
-			spotifyApiMetrics.recordPolicySkip(`${reason}:contains-cooldown`, "/me/library/contains", "library", trackCtx);
-			if (cached) {
-				streamDeck.logger.debug(
-					`[Spotify] Like check skipped (${reason}): contains cooldown, using cache`
-				);
-				this.currentState = {
-					...this.currentState,
-					isLiked: cached.isLiked,
-					likeKnown: true,
-					likeApiStatus: "ok"
-				};
-				this.emit(this.currentState);
-				return;
 			}
 			this.scheduleLikeRetry(track, reason);
 			return;
@@ -522,7 +453,7 @@ class SpotifyState {
 		}
 
 		if (isLiked === null) {
-			const fetchStatus: SpotifyLikeApiStatus = spotifyRateLimit.shouldThrottleLibrary()
+			const fetchStatus: SpotifyLikeApiStatus = spotifyRateLimit.shouldThrottle()
 				? "rate_limited"
 				: "unavailable";
 			const displayStatus = this.resolveDisplayApiStatus(track, fetchStatus);
@@ -581,7 +512,6 @@ class SpotifyState {
 		}
 
 		this.likedCheckInFlight = true;
-		this.lastContainsAt = Date.now();
 		try {
 			return await spotifyAPI.isTrackLiked(settings, track, reason, {
 				skipSearch: uriCached

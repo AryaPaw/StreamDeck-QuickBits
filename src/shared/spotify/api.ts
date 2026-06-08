@@ -2,7 +2,6 @@ import streamDeck from "@elgato/streamdeck";
 import { getSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyApiGateway } from "./api-gateway";
 import { spotifyApiMetrics } from "./api-metrics";
-import { spotifyRateLimit } from "./rate-limit";
 import type { SpotifySettings, SpotifyTrack } from "./types";
 
 const MAX_URI_CACHE_ENTRIES = 200;
@@ -54,14 +53,15 @@ export class SpotifyAPI {
 		settings: SpotifySettings,
 		url: string,
 		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> },
-		options?: { bypassLibraryThrottle?: boolean; reason?: string; track?: SpotifyTrack }
+		options?: { bypassQuota?: boolean; reason?: string; track?: SpotifyTrack }
 	): Promise<Response | null> {
 		return spotifyApiGateway.request(settings, url, {
 			method: init?.method ?? "GET",
 			headers: init?.headers,
 			reason: options?.reason ?? "api",
-			bypassLibraryThrottle: options?.bypassLibraryThrottle,
-			priority: options?.bypassLibraryThrottle ? "manual" : "normal",
+			bypassQuota: options?.bypassQuota,
+			bypassLibraryThrottle: options?.bypassQuota,
+			priority: options?.bypassQuota ? "manual" : "normal",
 			track: options?.track ? this.trackContext(options.track) : undefined
 		});
 	}
@@ -77,7 +77,7 @@ export class SpotifyAPI {
 			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`,
 			undefined,
 			{
-				bypassLibraryThrottle: bypassThrottle,
+				bypassQuota: bypassThrottle,
 				reason: "contains",
 				track
 			}
@@ -116,7 +116,7 @@ export class SpotifyAPI {
 			`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(uri)}`,
 			{ method },
 			{
-				bypassLibraryThrottle: true,
+				bypassQuota: true,
 				reason: method === "PUT" ? "like" : "unlike",
 				track
 			}
@@ -134,7 +134,6 @@ export class SpotifyAPI {
 			);
 			return false;
 		}
-		spotifyRateLimit.clearLibraryGiveUp();
 		return true;
 	}
 

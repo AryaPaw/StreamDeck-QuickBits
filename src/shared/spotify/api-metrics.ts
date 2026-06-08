@@ -129,7 +129,7 @@ class SpotifyApiMetrics {
 		return this.ring.slice(-limit).reverse();
 	}
 
-	getMetricsSnapshot(rolling30s: { search: number; library: number }, quotas: { search: number; library: number }) {
+	getMetricsSnapshot(rolling30s: { total: number; limit: number }) {
 		const now = Date.now();
 		const minuteMs = 60_000;
 		const buckets: Record<string, { request: number; skipped: number; cache_hit: number; blocked: number; r429: number }> =
@@ -157,13 +157,9 @@ class SpotifyApiMetrics {
 
 		return {
 			rolling30s,
-			quotas,
 			backoff: {
-				searchBlockedMs: spotifyRateLimit.shouldThrottleSearch()
-					? spotifyRateLimit.msUntilSearchReady()
-					: 0,
-				libraryBlockedMs: spotifyRateLimit.msUntilLibraryReady(),
-				libraryGiveUp: spotifyRateLimit.shouldGiveUpLibrary()
+				blockedMs: spotifyRateLimit.shouldThrottle() ? spotifyRateLimit.msUntilReady() : 0,
+				requestLimit: spotifyRateLimit.getRequestLimit()
 			},
 			perMinute,
 			eventCount: this.ring.length

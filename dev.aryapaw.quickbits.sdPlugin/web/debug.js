@@ -25,21 +25,19 @@ function fmtMs(ms) {
 }
 
 function renderStats(metrics) {
-	const { rolling30s, quotas, backoff } = metrics;
+	const { rolling30s, backoff } = metrics;
 	statsEl.innerHTML = `
-		<div class="stat"><label>Search (30s)</label><strong>${rolling30s.search}/${quotas.search}</strong></div>
-		<div class="stat"><label>Library (30s)</label><strong>${rolling30s.library}/${quotas.library}</strong></div>
+		<div class="stat"><label>API (30s)</label><strong>${rolling30s.total}/${rolling30s.limit}</strong></div>
 		<div class="stat"><label>Events buffered</label><strong>${metrics.eventCount}</strong></div>
-		<div class="stat"><label>Library backoff</label><strong>${fmtMs(backoff.libraryBlockedMs)}</strong></div>
+		<div class="stat"><label>429 backoff</label><strong>${fmtMs(backoff.blockedMs)}</strong></div>
+		<div class="stat"><label>Request limit</label><strong>${backoff.requestLimit}/30s</strong></div>
 	`;
 
-	const parts = [];
-	if (backoff.libraryGiveUp) parts.push("Library API in give-up window (6h pause after repeated 429s)");
-	if (backoff.searchBlockedMs > 0) parts.push(`Search backoff: ${fmtMs(backoff.searchBlockedMs)}`);
-	if (backoff.libraryBlockedMs > 0 && !backoff.libraryGiveUp) {
-		parts.push(`Library backoff: ${fmtMs(backoff.libraryBlockedMs)}`);
+	if (backoff.blockedMs > 0) {
+		backoffEl.textContent = `Spotify API paused after 429 — retry in ${fmtMs(backoff.blockedMs)} (limit ${backoff.requestLimit}/30s)`;
+	} else {
+		backoffEl.textContent = "";
 	}
-	backoffEl.textContent = parts.join(" · ");
 }
 
 function perMinuteKey(perMinute) {
