@@ -40,8 +40,15 @@ internal sealed class SpotifyDaemon
     private GlobalSystemMediaTransportControlsSession? _boundSession;
     private long _lastTransportUtcMs;
     private const int TransportGraceMs = 500;
+    private const int MaxArtworkCacheFiles = 50;
+    private const int MaxArtworkAgeDays = 7;
+    private const int ArtworkPruneDebounceMs = 300_000;
+    private const int ArtworkTmpMaxAgeHours = 1;
+    private const int ArtworkHashBytes = 12;
     private readonly SemaphoreSlim _artworkEmitLock = new(1, 1);
     private readonly StreamReader _stdinReader = new(Console.OpenStandardInput());
+    private Timer? _artworkPruneTimer;
+    private long _lastArtworkPruneUtcMs;
 
     public SpotifyDaemon(string filter, string pluginDir)
     {
@@ -62,10 +69,11 @@ internal sealed class SpotifyDaemon
             }
 
             WriteEvent(new { @event = "ready", filter = _filter, sessions = _manager.GetSessions().Count });
+            PruneArtworkCache();
+            _lastArtworkPruneUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             _ = Task.Run(ReadCommandsLoopAsync);
             SchedulePoll(0);
-            _ = EmitStateAsync(force: true);
-            _ = EmitArtworkAsync();
+            _ = RefreshSessionSnapshotAsync(force: true);
 
             while (_running && !_cts.Token.IsCancellationRequested)
             {
@@ -298,7 +306,32 @@ internal sealed class SpotifyDaemon
         }
 
         _lastArtworkKey = null;
-        ScheduleStateEmitDebounced();
+        _ = RefreshSessionSnapshotAsync(force: true);
+    }
+
+    private async Task RefreshSessionSnapshotAsync(bool force = false)
+    {
+        try
+        {
+            var session = await GetOrRefreshSessionAsync();
+            if (session == null)
+            {
+                await EmitStateAsync(force);
+                return;
+            }
+
+            var mediaProps = await session.TryGetMediaPropertiesAsync();
+            await EmitArtworkFromMediaPropsAsync(mediaProps, force);
+            await EmitStateFromSessionAsync(session, mediaProps, force);
+            if (force)
+            {
+                ScheduleArtworkRetry();
+            }
+        }
+        catch (Exception ex)
+        {
+            WriteEvent(new { @event = "error", message = ex.Message });
+        }
     }
 
     private void ScheduleStateEmitDebounced()
@@ -485,6 +518,8 @@ internal sealed class SpotifyDaemon
                     artworkPath = relativePath
                 });
 
+                MaybeScheduleArtworkCachePrune();
+
                 var session = await GetOrRefreshSessionAsync();
                 if (session != null)
                 {
@@ -558,8 +593,134 @@ internal sealed class SpotifyDaemon
     private static string BuildArtworkCacheRelativePath(string artworkKey)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(artworkKey));
-        var hex = Convert.ToHexString(hash.AsSpan(0, 6)).ToLowerInvariant();
+        var hex = Convert.ToHexString(hash.AsSpan(0, ArtworkHashBytes)).ToLowerInvariant();
         return $"cache/art-{hex}.jpg";
+    }
+
+    private void PruneArtworkCache()
+    {
+        try
+        {
+            var cacheDir = Path.Combine(_pluginDir, "cache");
+            if (!Directory.Exists(cacheDir))
+            {
+                return;
+            }
+
+            string? protectedFullPath = null;
+            if (!string.IsNullOrEmpty(_lastArtworkKey))
+            {
+                protectedFullPath = Path.GetFullPath(
+                    Path.Combine(_pluginDir, BuildArtworkCacheRelativePath(_lastArtworkKey)));
+            }
+
+            var ageCutoff = DateTime.UtcNow.AddDays(-MaxArtworkAgeDays);
+            var tmpCutoff = DateTime.UtcNow.AddHours(-ArtworkTmpMaxAgeHours);
+            var removed = 0;
+
+            foreach (var tmpPath in Directory.GetFiles(cacheDir, "art-*.tmp"))
+            {
+                try
+                {
+                    if (File.GetLastWriteTimeUtc(tmpPath) < tmpCutoff)
+                    {
+                        File.Delete(tmpPath);
+                        removed++;
+                    }
+                }
+                catch
+                {
+                    // ignore per-file delete errors
+                }
+            }
+
+            var survivors = new List<(string Path, DateTime WriteTimeUtc)>();
+            foreach (var filePath in Directory.GetFiles(cacheDir, "art-*.jpg"))
+            {
+                var fullPath = Path.GetFullPath(filePath);
+                if (protectedFullPath != null &&
+                    fullPath.Equals(protectedFullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    survivors.Add((filePath, File.GetLastWriteTimeUtc(filePath)));
+                    continue;
+                }
+
+                var writeTimeUtc = File.GetLastWriteTimeUtc(filePath);
+                if (writeTimeUtc < ageCutoff)
+                {
+                    try
+                    {
+                        File.Delete(filePath);
+                        removed++;
+                    }
+                    catch
+                    {
+                        // ignore per-file delete errors
+                    }
+                    continue;
+                }
+
+                survivors.Add((filePath, writeTimeUtc));
+            }
+
+            if (survivors.Count > MaxArtworkCacheFiles)
+            {
+                survivors.Sort((a, b) => a.WriteTimeUtc.CompareTo(b.WriteTimeUtc));
+                var overflow = survivors.Count - MaxArtworkCacheFiles;
+                for (var i = 0; i < overflow; i++)
+                {
+                    var candidate = survivors[i].Path;
+                    var candidateFull = Path.GetFullPath(candidate);
+                    if (protectedFullPath != null &&
+                        candidateFull.Equals(protectedFullPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        File.Delete(candidate);
+                        removed++;
+                    }
+                    catch
+                    {
+                        // ignore per-file delete errors
+                    }
+                }
+            }
+
+            var kept = Directory.GetFiles(cacheDir, "art-*.jpg").Length;
+            if (removed > 0)
+            {
+                WriteEvent(new { @event = "log", message = $"[Spotify] artwork cache pruned: removed={removed}, kept={kept}" });
+            }
+        }
+        catch
+        {
+            // cache cleanup is best-effort
+        }
+    }
+
+    private void MaybeScheduleArtworkCachePrune()
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (now - _lastArtworkPruneUtcMs >= ArtworkPruneDebounceMs)
+        {
+            PruneArtworkCache();
+            _lastArtworkPruneUtcMs = now;
+            return;
+        }
+
+        lock (_gate)
+        {
+            var delay = (int)Math.Max(1000, ArtworkPruneDebounceMs - (now - _lastArtworkPruneUtcMs));
+            _artworkPruneTimer?.Dispose();
+            _artworkPruneTimer = new Timer(_ =>
+            {
+                PruneArtworkCache();
+                _lastArtworkPruneUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }, null, delay, Timeout.Infinite);
+        }
     }
 
     private static bool StatesEqual(SpotifyLocalStatePayload? a, SpotifyLocalStatePayload b)
@@ -767,6 +928,8 @@ internal sealed class SpotifyDaemon
             {
                 timer?.Dispose();
             }
+
+            _artworkPruneTimer?.Dispose();
         }
 
         _cts.Cancel();

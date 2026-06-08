@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>QuickBits — Spotify API Debug</title>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+	<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+	<style>
+		*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+		body {
+			background: #0a0a0a;
+			color: #e0e0e0;
+			font-family: 'Inter', sans-serif;
+			font-size: 14px;
+			line-height: 1.5;
+			padding: 24px;
+		}
+		a { color: #1DB954; text-decoration: none; }
+		a:hover { text-decoration: underline; }
+		.header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			margin-bottom: 24px;
+			flex-wrap: wrap;
+			gap: 12px;
+		}
+		.header h1 { font-size: 20px; font-weight: 600; }
+		.header span { color: #666; font-size: 13px; }
+		.stats {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+			gap: 12px;
+			margin-bottom: 20px;
+		}
+		.stat {
+			background: #141414;
+			border: 1px solid #252525;
+			border-radius: 10px;
+			padding: 14px;
+		}
+		.stat label { display: block; color: #666; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+		.stat strong { font-size: 22px; font-weight: 600; }
+		.panel {
+			background: #141414;
+			border: 1px solid #252525;
+			border-radius: 12px;
+			padding: 20px;
+			margin-bottom: 20px;
+		}
+		.panel h2 { font-size: 15px; margin-bottom: 14px; font-weight: 600; }
+		.filters {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-bottom: 14px;
+		}
+		select, button {
+			background: #1a1a1a;
+			border: 1px solid #2a2a2a;
+			border-radius: 8px;
+			color: #e0e0e0;
+			padding: 8px 12px;
+			font-family: inherit;
+			font-size: 13px;
+		}
+		button { cursor: pointer; }
+		button:hover { border-color: #1DB954; }
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 12px;
+		}
+		th, td {
+			text-align: left;
+			padding: 8px 10px;
+			border-bottom: 1px solid #222;
+		}
+		th { color: #888; font-weight: 500; }
+		.kind-request { color: #1DB954; }
+		.kind-skipped, .kind-blocked { color: #d4a520; }
+		.kind-429 { color: #f87171; }
+		.kind-cache_hit { color: #60a5fa; }
+		.backoff-warn { color: #f87171; font-size: 13px; margin-top: 8px; }
+		canvas { max-height: 260px; }
+	</style>
+</head>
+<body>
+	<div class="header">
+		<div>
+			<h1>Spotify Web API Debug</h1>
+			<span>localhost only · polling 3s · <a href="/">Setup</a></span>
+		</div>
+		<div>
+			<button type="button" id="exportBtn">Export JSON</button>
+		</div>
+	</div>
+
+	<div class="stats" id="stats"></div>
+
+	<div class="panel">
+		<h2>Requests per minute (last hour)</h2>
+		<canvas id="chart"></canvas>
+		<div id="backoff" class="backoff-warn"></div>
+	</div>
+
+	<div class="panel">
+		<h2>Recent events</h2>
+		<div class="filters">
+			<select id="kindFilter">
+				<option value="">All kinds</option>
+				<option value="request">request</option>
+				<option value="skipped">skipped</option>
+				<option value="blocked">blocked</option>
+				<option value="cache_hit">cache_hit</option>
+				<option value="429">429</option>
+			</select>
+			<select id="bucketFilter">
+				<option value="">All buckets</option>
+				<option value="search">search</option>
+				<option value="library">library</option>
+			</select>
+		</div>
+		<table>
+			<thead>
+				<tr>
+					<th>Time</th>
+					<th>Kind</th>
+					<th>Bucket</th>
+					<th>Endpoint</th>
+					<th>Track</th>
+					<th>Reason</th>
+				</tr>
+			</thead>
+			<tbody id="eventsBody"></tbody>
+		</table>
+	</div>
+
+	<script src="/debug/debug.js"></script>
+</body>
+</html>

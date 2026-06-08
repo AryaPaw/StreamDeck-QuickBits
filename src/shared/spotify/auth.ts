@@ -1,8 +1,4 @@
 import { exec } from "node:child_process";
-import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import streamDeck from "@elgato/streamdeck";
 import { saveSpotifySettings } from "./settings";
@@ -18,106 +14,41 @@ export const SCOPES = [
 	"user-library-modify"
 ].join(" ");
 
-type SetupCallback = (clientId: string, clientSecret: string) => Promise<void>;
+type SetupCallback = (clientId: string, clientSecret: string, appName?: string) => Promise<void>;
 
 class SpotifyAuth {
-	private server: ReturnType<typeof createServer> | null = null;
 	private pendingSettings: SpotifySettings | null = null;
 	private settingsCallback: ((settings: SpotifySettings) => void) | null = null;
 	private refreshInFlight: Promise<boolean> | null = null;
+	private setupSubmitCallback: SetupCallback | null = null;
+
+	setPendingOAuthSettings(settings: SpotifySettings): void {
+		this.pendingSettings = settings;
+	}
+
+	async runSetupSubmitCallback(
+		clientId: string,
+		clientSecret: string,
+		appName?: string
+	): Promise<void> {
+		await this.setupSubmitCallback?.(clientId, clientSecret, appName);
+	}
+
+	async finishOAuthCallback(code: string): Promise<SpotifySettings | null> {
+		if (!this.pendingSettings) {
+			return null;
+		}
+		const result = await this.exchangeCodeForToken(this.pendingSettings, code);
+		this.pendingSettings = null;
+		return result.refreshToken ? result : null;
+	}
+
+	notifySettingsReceived(settings: SpotifySettings): void {
+		this.settingsCallback?.(settings);
+	}
 
 	async startSetupServer(onCredentialsSubmit: SetupCallback): Promise<void> {
-		if (this.server) {
-			this.server.close();
-		}
-
-		const currentDir = dirname(fileURLToPath(import.meta.url));
-		const webDir = join(currentDir, "..", "web");
-
-		this.server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-			const url = new URL(req.url || "/", "http://127.0.0.1:5789");
-
-			if (url.pathname === "/" || url.pathname === "/setup") {
-				try {
-					const html = await readFile(join(webDir, "setup.html"), "utf-8");
-					res.writeHead(200, { "Content-Type": "text/html" });
-					res.end(html);
-				} catch {
-					res.writeHead(500, { "Content-Type": "text/plain" });
-					res.end("Error loading setup page");
-				}
-				return;
-			}
-
-			if (url.pathname === "/submit" && req.method === "POST") {
-				let body = "";
-				req.on("data", (chunk: Buffer) => body += chunk.toString());
-				req.on("end", async () => {
-					try {
-						const { clientId, clientSecret } = JSON.parse(body);
-
-						if (!clientId || !clientSecret) {
-							res.writeHead(400, { "Content-Type": "application/json" });
-							res.end(JSON.stringify({ success: false, error: "Missing credentials" }));
-							return;
-						}
-
-						this.pendingSettings = { clientId, clientSecret };
-						await onCredentialsSubmit(clientId, clientSecret);
-
-						const authUrl = new URL("https://accounts.spotify.com/authorize");
-						authUrl.searchParams.set("client_id", clientId);
-						authUrl.searchParams.set("response_type", "code");
-						authUrl.searchParams.set("redirect_uri", REDIRECT_URI);
-						authUrl.searchParams.set("scope", SCOPES);
-
-						res.writeHead(200, { "Content-Type": "application/json" });
-						res.end(JSON.stringify({ success: true, authUrl: authUrl.toString() }));
-					} catch {
-						res.writeHead(400, { "Content-Type": "application/json" });
-						res.end(JSON.stringify({ success: false, error: "Invalid request" }));
-					}
-				});
-				return;
-			}
-
-			if (url.pathname === "/callback") {
-				const code = url.searchParams.get("code");
-				const error = url.searchParams.get("error");
-
-				if (code && this.pendingSettings) {
-					streamDeck.logger.info("[Spotify] Exchanging code for token...");
-					const newSettings = await this.exchangeCodeForToken(this.pendingSettings, code);
-					streamDeck.logger.info(
-						`[Spotify] Token exchange result: ${newSettings.refreshToken ? "success" : "failed"}`
-					);
-
-					if (newSettings.refreshToken) {
-						this.settingsCallback?.(newSettings);
-						res.writeHead(302, { "Location": "/?success=true" });
-						res.end();
-					} else {
-						res.writeHead(302, { "Location": "/?error=token_failed" });
-						res.end();
-					}
-				} else {
-					res.writeHead(302, { "Location": `/?error=${encodeURIComponent(error || "auth_failed")}` });
-					res.end();
-				}
-
-				setTimeout(() => {
-					this.server?.close();
-					this.server = null;
-					this.pendingSettings = null;
-				}, 2000);
-				return;
-			}
-
-			res.writeHead(404);
-			res.end("Not found");
-		});
-
-		this.server.listen(5789);
+		this.setupSubmitCallback = onCredentialsSubmit;
 	}
 
 	async openSetupPage(): Promise<boolean> {
@@ -131,11 +62,6 @@ class SpotifyAuth {
 
 	onSettingsReceived(callback: (settings: SpotifySettings) => void): void {
 		this.settingsCallback = callback;
-	}
-
-	stopServer(): void {
-		this.server?.close();
-		this.server = null;
 	}
 
 	private async exchangeCodeForToken(settings: SpotifySettings, code: string): Promise<SpotifySettings> {

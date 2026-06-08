@@ -6,7 +6,7 @@ import streamDeck, {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
-import { spotifyAuth, loadSpotifySettings, saveSpotifySettings, getSpotifySettings } from "../shared/spotify";
+import { spotifyAuth, loadSpotifySettings, saveSpotifySettings, getSpotifySettings, spotifyWebServer } from "../shared/spotify";
 
 type SpotifySetupActionSettings = {
 	clientId?: string;
@@ -55,8 +55,13 @@ export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettin
 		await saveSpotifySettings({ clientId, clientSecret });
 		this.sendConnectionStatus(false, "Opening browser...");
 
-		await spotifyAuth.startSetupServer(async (id, secret) => {
-			await saveSpotifySettings({ clientId: id, clientSecret: secret });
+		spotifyWebServer.ensure();
+		await spotifyAuth.startSetupServer(async (id, secret, appName) => {
+			await saveSpotifySettings({
+				clientId: id,
+				clientSecret: secret,
+				...(appName ? { appName } : {})
+			});
 		});
 
 		const opened = await spotifyAuth.openSetupPage();
@@ -72,8 +77,13 @@ export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettin
 	}
 
 	private async startSetup(ev: KeyDownEvent): Promise<void> {
-		await spotifyAuth.startSetupServer(async (clientId, clientSecret) => {
-			await saveSpotifySettings({ clientId, clientSecret });
+		spotifyWebServer.ensure();
+		await spotifyAuth.startSetupServer(async (clientId, clientSecret, appName) => {
+			await saveSpotifySettings({
+				clientId,
+				clientSecret,
+				...(appName ? { appName } : {})
+			});
 		});
 
 		const opened = await spotifyAuth.openSetupPage();

@@ -44,11 +44,6 @@ export class SpotifyLikeAction extends SingletonAction {
 			return;
 		}
 
-		if (state.likeApiStatus !== "ok") {
-			await ev.action.showAlert();
-			return;
-		}
-
 		const { track, isLiked } = state;
 		if (!track) {
 			await ev.action.showAlert();
@@ -79,7 +74,7 @@ export class SpotifyLikeAction extends SingletonAction {
 
 		await this.currentAction.setTitle("");
 
-		if (state.likeApiStatus !== "ok") {
+		if (state.likeApiStatus === "no_auth") {
 			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
 			return;
 		}

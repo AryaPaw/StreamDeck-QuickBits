@@ -21,13 +21,15 @@ import {
 const PLACEHOLDER_IMAGE = "imgs/actions/spotify/key";
 const OVERLAY_PAUSE_DEBOUNCE_MS = 500;
 const PLAYING_GUARD_MS = 800;
-const TRACK_TRANSITION_MS = 2_000;
+const TRACK_TRANSITION_MS = 5_000;
+const NULL_TRACK_HOLD_MS = 8_000;
+const ARTWORK_WAIT_MS = 2_000;
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-now-playing" })
 export class SpotifyNowPlayingAction extends SingletonAction {
 	private currentAction: WillAppearEvent["action"] | null = null;
 	private unsubscribe: (() => void) | null = null;
-	private lastTrackId: string | null = null;
+	private lastTrackKey: string | null = null;
 	private cachedArtKey: string | null = null;
 	private cachedOverlayImage: string | null = null;
 	private cachedIsPlaying: boolean | null = null;
@@ -37,6 +39,8 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	private optimisticUntil = 0;
 	private playingGuardUntil = 0;
 	private trackTransitionUntil = 0;
+	private lastHadTrackAt = 0;
+	private artworkWaitUntil = 0;
 
 	override async onWillAppear(ev: WillAppearEvent): Promise<void> {
 		this.currentAction = ev.action;
@@ -72,6 +76,10 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		}
 	}
 
+	private trackKey(track: SpotifyTrack): string {
+		return `${track.id}:${track.name}:${track.artist}`;
+	}
+
 	private clearPauseOverlayTimer(): void {
 		if (this.pauseOverlayTimer) {
 			clearTimeout(this.pauseOverlayTimer);
@@ -79,11 +87,15 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		}
 	}
 
-	private beginTrackTransition(): void {
-		this.trackTransitionUntil = Date.now() + TRACK_TRANSITION_MS;
+	private beginTrackTransition(forcePlaying: boolean): void {
+		if (forcePlaying) {
+			this.trackTransitionUntil = Date.now() + TRACK_TRANSITION_MS;
+			this.playingGuardUntil = Date.now() + TRACK_TRANSITION_MS;
+			this.displayedIsPlaying = true;
+		} else {
+			this.trackTransitionUntil = 0;
+		}
 		this.clearPauseOverlayTimer();
-		this.displayedIsPlaying = true;
-		this.playingGuardUntil = Date.now() + PLAYING_GUARD_MS;
 		if (this.cachedOverlayImage) {
 			this.heldOverlayImage = this.cachedOverlayImage;
 		}
@@ -101,8 +113,14 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		const { track } = state;
 
 		if (!track) {
+			if (Date.now() - this.lastHadTrackAt < NULL_TRACK_HOLD_MS && this.heldOverlayImage) {
+				await this.currentAction.setTitle("");
+				await this.currentAction.setImage(this.heldOverlayImage);
+				return;
+			}
+
 			this.clearPauseOverlayTimer();
-			this.lastTrackId = null;
+			this.lastTrackKey = null;
 			this.cachedArtKey = null;
 			this.cachedOverlayImage = null;
 			this.cachedIsPlaying = null;
@@ -115,11 +133,31 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 			return;
 		}
 
+		this.lastHadTrackAt = Date.now();
 		await this.currentAction.setTitle("");
 
-		if (this.lastTrackId !== track.id) {
-			this.lastTrackId = track.id;
-			this.beginTrackTransition();
+		const nextTrackKey = this.trackKey(track);
+		if (this.lastTrackKey !== nextTrackKey) {
+			this.lastTrackKey = nextTrackKey;
+			const forcePlaying = state.playbackState === "playing" || track.isPlaying;
+			this.beginTrackTransition(forcePlaying);
+			const artPath = resolveTrackArtPath(track.albumArtPath);
+			if (!artPath && !track.albumArtBase64) {
+				this.artworkWaitUntil = Date.now() + ARTWORK_WAIT_MS;
+			} else {
+				this.artworkWaitUntil = 0;
+			}
+		}
+
+		if (
+			state.playbackState === "paused" &&
+			!this.isInTrackTransition() &&
+			Date.now() >= this.optimisticUntil
+		) {
+			this.clearPauseOverlayTimer();
+			this.playingGuardUntil = 0;
+			await this.applyDisplay(track, false);
+			return;
 		}
 
 		if (Date.now() < this.optimisticUntil) {
@@ -156,6 +194,17 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	}
 
 	private async applyDisplay(track: SpotifyTrack, isPlaying: boolean): Promise<void> {
+		if (!isPlaying && this.isInTrackTransition()) {
+			isPlaying = true;
+		}
+
+		if (!isPlaying && !this.canRenderPause(track)) {
+			if (this.heldOverlayImage) {
+				await this.currentAction?.setImage(this.heldOverlayImage);
+			}
+			return;
+		}
+
 		if (this.displayedIsPlaying === isPlaying) {
 			const artPath = resolveTrackArtPath(track.albumArtPath);
 			const artKey = `${track.id}:${artPath ?? track.albumArtBase64?.slice(0, 32) ?? ""}:${isPlaying}`;
@@ -171,8 +220,16 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 		await this.renderTrack(track, isPlaying);
 		this.displayedIsPlaying = isPlaying;
 		if (isPlaying) {
-			this.playingGuardUntil = Date.now() + PLAYING_GUARD_MS;
+			this.playingGuardUntil = Math.max(this.playingGuardUntil, Date.now() + PLAYING_GUARD_MS);
 		}
+	}
+
+	private canRenderPause(track: SpotifyTrack): boolean {
+		const artPath = resolveTrackArtPath(track.albumArtPath);
+		if (artPath && buildPlayingImage(artPath)) {
+			return true;
+		}
+		return !!track.albumArtBase64;
 	}
 
 	private async renderTrack(track: SpotifyTrack, isPlaying: boolean): Promise<void> {
@@ -195,17 +252,25 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 				await this.currentAction.setImage(this.heldOverlayImage);
 				return;
 			}
+			if (Date.now() < this.artworkWaitUntil) {
+				return;
+			}
 			await this.currentAction.setImage(PLACEHOLDER_IMAGE);
 			return;
 		}
 
 		const image = this.resolveKeyImage(track, artPath, isPlaying);
 		if (!image) {
-			if (this.heldOverlayImage) {
+			if (isPlaying && this.heldOverlayImage) {
 				await this.currentAction.setImage(this.heldOverlayImage);
 				return;
 			}
-			if (this.cachedOverlayImage) {
+			if (!isPlaying) {
+				return;
+			}
+			if (this.heldOverlayImage) {
+				await this.currentAction.setImage(this.heldOverlayImage);
+			} else if (this.cachedOverlayImage) {
 				await this.currentAction.setImage(this.cachedOverlayImage);
 			} else {
 				await this.currentAction.setImage(PLACEHOLDER_IMAGE);
@@ -239,7 +304,7 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 				return paused;
 			}
 
-			return buildPlayingImage(artPath);
+			return null;
 		}
 
 		if (track.albumArtBase64) {

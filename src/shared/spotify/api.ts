@@ -1,63 +1,100 @@
 import streamDeck from "@elgato/streamdeck";
-import { spotifyAuth } from "./auth";
+import { getSpotifySettings, saveSpotifySettings } from "./settings";
+import { spotifyApiGateway } from "./api-gateway";
+import { spotifyApiMetrics } from "./api-metrics";
 import { spotifyRateLimit } from "./rate-limit";
 import type { SpotifySettings, SpotifyTrack } from "./types";
+
+const MAX_URI_CACHE_ENTRIES = 200;
 
 export class SpotifyAPI {
 	private uriCache = new Map<string, string>();
 	private resolveInFlight = new Map<string, Promise<string | null>>();
+	private uriCacheHydrated = false;
+
+	hasCachedUri(trackId: string): boolean {
+		return this.uriCache.has(trackId);
+	}
+
+	hydrateUriCache(settings: SpotifySettings): void {
+		if (this.uriCacheHydrated) {
+			return;
+		}
+		this.uriCacheHydrated = true;
+		const cached = settings.trackUriCache;
+		if (!cached) {
+			return;
+		}
+		for (const [trackId, uri] of Object.entries(cached)) {
+			this.uriCache.set(trackId, uri);
+		}
+	}
+
+	private persistUriCache(): void {
+		const settings = getSpotifySettings();
+		const entries = [...this.uriCache.entries()]
+			.slice(-MAX_URI_CACHE_ENTRIES)
+			.map(([trackId, uri]) => [trackId, uri] as const);
+		void saveSpotifySettings({
+			...settings,
+			trackUriCache: Object.fromEntries(entries)
+		});
+	}
+
+	private rememberUri(trackId: string, uri: string): void {
+		this.uriCache.set(trackId, uri);
+		this.persistUriCache();
+	}
+
+	private trackContext(track: SpotifyTrack): { title: string; artist: string } {
+		return { title: track.name, artist: track.artist };
+	}
 
 	private async requestWithAuth(
 		settings: SpotifySettings,
 		url: string,
 		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> },
-		clearRateLimitOnSuccess = true
+		options?: { bypassLibraryThrottle?: boolean; reason?: string; track?: SpotifyTrack }
 	): Promise<Response | null> {
-		if (spotifyRateLimit.shouldThrottle()) {
-			return null;
-		}
-
-		let token = await spotifyAuth.ensureAccessToken(settings);
-		if (!token) {
-			return null;
-		}
-
-		const doFetch = (authToken: string) => {
-			const headers = { ...(init?.headers ?? {}), Authorization: `Bearer ${authToken}` };
-			return fetch(url, { ...init, headers });
-		};
-
-		try {
-			let response = await doFetch(token);
-			if (response.status === 401) {
-				token = await spotifyAuth.ensureAccessToken(settings, true);
-				if (!token) return null;
-				response = await doFetch(token);
-			}
-
-			if (response.status === 429) {
-				spotifyRateLimit.record429("request", response);
-				return response;
-			}
-
-			if ((response.ok || response.status === 204) && clearRateLimitOnSuccess) {
-				spotifyRateLimit.recordSuccess();
-			}
-
-			return response;
-		} catch (e) {
-			streamDeck.logger.error(`[Spotify] request failed: ${url} ${e}`);
-			return null;
-		}
+		return spotifyApiGateway.request(settings, url, {
+			method: init?.method ?? "GET",
+			headers: init?.headers,
+			reason: options?.reason ?? "api",
+			bypassLibraryThrottle: options?.bypassLibraryThrottle,
+			priority: options?.bypassLibraryThrottle ? "manual" : "normal",
+			track: options?.track ? this.trackContext(options.track) : undefined
+		});
 	}
 
-	private async isSavedUri(settings: SpotifySettings, uri: string): Promise<boolean | null> {
+	private async isSavedUri(
+		settings: SpotifySettings,
+		uri: string,
+		bypassThrottle = false,
+		track?: SpotifyTrack
+	): Promise<boolean | null> {
 		const response = await this.requestWithAuth(
 			settings,
-			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`
+			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`,
+			undefined,
+			{
+				bypassLibraryThrottle: bypassThrottle,
+				reason: "contains",
+				track
+			}
 		);
 		if (!response) return null;
-		if (response.status === 429) return null;
+		if (response.status === 429) {
+			streamDeck.logger.warn(
+				`[Spotify] isSaved 429 retry-after=${response.headers.get("Retry-After") ?? "none"}`
+			);
+			return null;
+		}
+		if (response.status === 403) {
+			streamDeck.logger.error(
+				`[Spotify] isSaved forbidden (403) - re-authorize via Spotify Setup (user-library-read scope)`
+			);
+			return null;
+		}
 		if (!response.ok) {
 			streamDeck.logger.error(
 				`[Spotify] isSaved failed: ${response.status} ${await response.text()}`
@@ -68,54 +105,56 @@ export class SpotifyAPI {
 		return data[0] || false;
 	}
 
-	private async setSavedUri(settings: SpotifySettings, uri: string, method: "PUT" | "DELETE"): Promise<boolean> {
+	private async setSavedUri(
+		settings: SpotifySettings,
+		uri: string,
+		method: "PUT" | "DELETE",
+		track: SpotifyTrack
+	): Promise<boolean> {
 		const response = await this.requestWithAuth(
 			settings,
 			`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(uri)}`,
-			{ method }
+			{ method },
+			{
+				bypassLibraryThrottle: true,
+				reason: method === "PUT" ? "like" : "unlike",
+				track
+			}
 		);
 		if (!response) return false;
-		if (response.status === 429) return false;
+		if (response.status === 429) {
+			streamDeck.logger.warn(
+				`[Spotify] ${method === "PUT" ? "save" : "remove"} rate limited (429) retry-after=${response.headers.get("Retry-After") ?? "none"}`
+			);
+			return false;
+		}
 		if (!response.ok) {
 			streamDeck.logger.error(
 				`[Spotify] ${method === "PUT" ? "save" : "remove"} failed: ${response.status} ${await response.text()}`
 			);
+			return false;
 		}
-		return response.ok;
-	}
-
-	private buildSearchQueries(track: SpotifyTrack): string[] {
-		const name = track.name.trim();
-		const artist = track.artist.trim();
-		const album = track.album.trim();
-		const queries: string[] = [];
-
-		if (name && artist) {
-			queries.push(`track:"${name}" artist:"${artist}"`);
-			queries.push(`track:${name} artist:${artist}`);
-		}
-		if (name) {
-			queries.push(`track:"${name}"`);
-		}
-		if (name && album) {
-			queries.push(`track:"${name}" album:"${album}"`);
-		}
-
-		return queries;
+		spotifyRateLimit.clearLibraryGiveUp();
+		return true;
 	}
 
 	private async searchTrackUri(
 		settings: SpotifySettings,
 		query: string,
-		reason: string
+		reason: string,
+		track: SpotifyTrack
 	): Promise<string | null> {
 		const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`;
-		const response = await this.requestWithAuth(settings, url, undefined, false);
+		const response = await this.requestWithAuth(settings, url, undefined, {
+			reason: `search:${reason}`,
+			track
+		});
 		if (!response) {
+			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): search blocked or failed`);
 			return null;
 		}
 		if (response.status === 429) {
-			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): rate limited`);
+			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): search rate limited`);
 			return null;
 		}
 		if (!response.ok) {
@@ -136,24 +175,35 @@ export class SpotifyAPI {
 		}
 	}
 
+	private buildSearchQuery(track: SpotifyTrack): string | null {
+		const name = track.name.trim();
+		const artist = track.artist.trim();
+		if (!name || !artist) {
+			return name ? `track:"${name}"` : null;
+		}
+		return `track:"${name}" artist:"${artist}"`;
+	}
+
 	private async resolveTrackUriInner(
 		settings: SpotifySettings,
 		track: SpotifyTrack,
 		reason: string
 	): Promise<string | null> {
-		const queries = this.buildSearchQueries(track);
-		for (const query of queries) {
-			const uri = await this.searchTrackUri(settings, query, reason);
-			if (uri) {
-				this.uriCache.set(track.id, uri);
-				streamDeck.logger.debug(
-					`[Spotify] resolveTrackUri (${reason}): "${track.name}" -> ${uri} (q=${query})`
-				);
-				return uri;
-			}
-			if (spotifyRateLimit.shouldThrottle()) {
-				break;
-			}
+		const query = this.buildSearchQuery(track);
+		if (!query) {
+			streamDeck.logger.warn(
+				`[Spotify] resolveTrackUri (${reason}): no query for "${track.name}"`
+			);
+			return null;
+		}
+
+		const uri = await this.searchTrackUri(settings, query, reason, track);
+		if (uri) {
+			this.rememberUri(track.id, uri);
+			streamDeck.logger.debug(
+				`[Spotify] resolveTrackUri (${reason}): "${track.name}" -> ${uri}`
+			);
+			return uri;
 		}
 
 		streamDeck.logger.warn(
@@ -173,6 +223,14 @@ export class SpotifyAPI {
 
 		const cached = this.uriCache.get(track.id);
 		if (cached) {
+			spotifyApiMetrics.record({
+				kind: "cache_hit",
+				bucket: "search",
+				method: "GET",
+				endpoint: "/v1/search",
+				reason: `uri-cache:${reason}`,
+				track: this.trackContext(track)
+			});
 			return cached;
 		}
 
@@ -190,8 +248,13 @@ export class SpotifyAPI {
 		}
 	}
 
-	async isTrackSaved(settings: SpotifySettings, trackUri: string): Promise<boolean | null> {
-		return this.isSavedUri(settings, trackUri);
+	async isTrackSaved(
+		settings: SpotifySettings,
+		trackUri: string,
+		bypassThrottle = false,
+		track?: SpotifyTrack
+	): Promise<boolean | null> {
+		return this.isSavedUri(settings, trackUri, bypassThrottle, track);
 	}
 
 	async isEpisodeSaved(settings: SpotifySettings, episodeId: string): Promise<boolean | null> {
@@ -201,9 +264,22 @@ export class SpotifyAPI {
 	async isTrackLiked(
 		settings: SpotifySettings,
 		track: SpotifyTrack,
-		reason = "unknown"
+		reason = "unknown",
+		options?: { skipSearch?: boolean; bypassContainsThrottle?: boolean }
 	): Promise<boolean | null> {
-		const uri = await this.resolveTrackUri(settings, track, reason);
+		let uri: string | null = null;
+
+		if (track.uri.startsWith("spotify:")) {
+			uri = track.uri;
+		} else {
+			const cached = this.uriCache.get(track.id);
+			if (cached) {
+				uri = cached;
+			} else if (!options?.skipSearch) {
+				uri = await this.resolveTrackUri(settings, track, reason);
+			}
+		}
+
 		if (!uri) {
 			return null;
 		}
@@ -211,7 +287,7 @@ export class SpotifyAPI {
 			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): episode "${track.name}"`);
 			return false;
 		}
-		return this.isTrackSaved(settings, uri);
+		return this.isTrackSaved(settings, uri, options?.bypassContainsThrottle === true, track);
 	}
 
 	async setLike(settings: SpotifySettings, track: SpotifyTrack, liked: boolean): Promise<boolean> {
@@ -219,7 +295,7 @@ export class SpotifyAPI {
 		if (!uri) {
 			return false;
 		}
-		return this.setSavedUri(settings, uri, liked ? "PUT" : "DELETE");
+		return this.setSavedUri(settings, uri, liked ? "PUT" : "DELETE", track);
 	}
 }
 

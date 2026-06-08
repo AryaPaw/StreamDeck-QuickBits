@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import type { SpotifyTrack } from "../types";
 import type { SpotifyLocalState } from "./types";
 
-export function localTrackId(title: string): string {
-	const normalized = title.trim().toLowerCase();
+export function localTrackId(title: string, artist = ""): string {
+	const normalized = `${title.trim().toLowerCase()}\0${artist.trim().toLowerCase()}`;
 	return createHash("sha1").update(normalized).digest("hex").slice(0, 16);
 }
 
@@ -13,7 +13,7 @@ export function mapLocalStateToTrack(local: SpotifyLocalState): SpotifyTrack | n
 		return null;
 	}
 
-	const id = localTrackId(t.title);
+	const id = localTrackId(t.title, t.artist || "");
 	const isPlaying = local.player.state === "playing";
 
 	return {

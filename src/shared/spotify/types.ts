@@ -1,9 +1,17 @@
+export type SpotifyLikedCacheEntry = {
+	isLiked: boolean;
+	at: number;
+};
+
 export type SpotifySettings = {
+	appName?: string;
 	clientId?: string;
 	clientSecret?: string;
 	refreshToken?: string;
 	accessToken?: string;
 	tokenExpiry?: number;
+	likedCache?: Record<string, SpotifyLikedCacheEntry>;
+	trackUriCache?: Record<string, string>;
 };
 
 export type SpotifyTrack = {
@@ -23,10 +31,14 @@ export type SpotifyTrack = {
 
 export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavailable";
 
+export type PlaybackStateName = "playing" | "paused" | "stopped" | "unknown";
+
 export type SpotifyPlaybackState = {
 	track: SpotifyTrack | null;
+	playbackState: PlaybackStateName;
 	isLiked: boolean;
 	likeApiStatus: SpotifyLikeApiStatus;
+	likeKnown: boolean;
 };
 
 export type SpotifyPlayingItem = {

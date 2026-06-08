@@ -9,7 +9,7 @@ import { SpotifyNowPlayingAction } from "./actions/spotify-now-playing";
 import { SpotifyPreviousAction } from "./actions/spotify-previous";
 import { SpotifyNextAction } from "./actions/spotify-next";
 import { SpotifyLikeAction } from "./actions/spotify-like";
-import { loadSpotifySettings } from "./shared/spotify";
+import { loadSpotifySettings, spotifyWebServer, spotifyApiMetrics } from "./shared/spotify";
 
 streamDeck.actions.registerAction(new SetVolumeAction());
 streamDeck.actions.registerAction(new ToggleDndAction());
@@ -24,5 +24,7 @@ streamDeck.actions.registerAction(new SpotifyLikeAction());
 // Load Spotify settings after connect
 streamDeck.connect().then(() => {
 	loadSpotifySettings();
+	spotifyWebServer.ensure();
+	void spotifyApiMetrics.hydrate();
 	void runSkydimoStartupStaticBootstrap(skydimoLightingAction);
 });

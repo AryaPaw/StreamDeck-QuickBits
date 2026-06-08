@@ -129,6 +129,19 @@
 			font-weight: 500;
 		}
 
+		.steps .copyable {
+			background: #1c1c1c;
+			border: 1px solid #2a2a2a;
+			border-radius: 4px;
+			padding: 2px 6px;
+			cursor: pointer;
+			transition: border-color 0.15s;
+		}
+
+		.steps .copyable:hover {
+			border-color: #1DB954;
+		}
+
 		form {
 			display: flex;
 			flex-direction: column;
@@ -147,6 +160,14 @@
 			font-size: 14px;
 			outline: none;
 			transition: border-color 0.15s, box-shadow 0.15s;
+		}
+
+		label {
+			display: flex;
+			flex-direction: column;
+			gap: 6px;
+			font-size: 12px;
+			color: #888;
 		}
 
 		input::placeholder {
@@ -243,6 +264,17 @@
 			font-size: 14px;
 		}
 
+		.footer-links {
+			margin-top: 20px;
+			text-align: center;
+			font-size: 13px;
+			color: #666;
+		}
+
+		.footer-links a {
+			color: #1DB954;
+		}
+
 		::selection {
 			background: #1DB954;
 			color: #fff;
@@ -269,7 +301,7 @@
 			<div class="steps">
 				<ol>
 					<li>Open <a href="https://developer.spotify.com/dashboard" target="_blank">Spotify Developer Dashboard</a></li>
-					<li><a href="https://developer.spotify.com/dashboard/create" target="_blank">Create a new app</a></li>
+					<li><a href="https://developer.spotify.com/dashboard/create" target="_blank">Create a new app</a> named <b id="app-name-hint" class="copyable">StreamDeck QuickBits</b></li>
 					<li>Set Redirect URI to <code id="redirect-uri">http://127.0.0.1:5789/callback</code></li>
 					<li>Select <b>Web API</b> in "APIs used"</li>
 					<li>Save the app and open <b>Settings</b></li>
@@ -278,12 +310,22 @@
 			</div>
 
 			<form id="form">
-				<input type="text" id="clientId" placeholder="Client ID" required autocomplete="off" spellcheck="false">
-				<input type="password" id="clientSecret" placeholder="Client Secret" required autocomplete="off">
+				<label>
+					Client ID
+					<input type="text" id="clientId" placeholder="Client ID" required autocomplete="off" spellcheck="false">
+				</label>
+				<label>
+					Client Secret
+					<input type="password" id="clientSecret" placeholder="Client Secret" required autocomplete="off">
+				</label>
 				<button type="submit" id="submitBtn">Connect to Spotify</button>
 			</form>
 
 			<div id="message" class="message"></div>
+
+			<p class="footer-links">
+				<a href="/debug" target="_blank">Open API debug dashboard</a>
+			</p>
 		</div>
 
 		<div class="success-view" id="successView">
@@ -299,9 +341,33 @@
 		const submitBtn = document.getElementById('submitBtn');
 		const mainView = document.querySelector('.main-view');
 		const successView = document.getElementById('successView');
+		const clientIdInput = document.getElementById('clientId');
+		const appNameHint = document.getElementById('app-name-hint');
+
+		async function loadSavedSettings() {
+			try {
+				const res = await fetch('/settings');
+				if (!res.ok) return;
+				const data = await res.json();
+				if (data.clientId) {
+					clientIdInput.value = data.clientId;
+				}
+			} catch {
+				// setup server may not be ready yet
+			}
+		}
+
+		loadSavedSettings();
 
 		// Copy redirect URI on click
 		document.getElementById('redirect-uri').addEventListener('click', function() {
+			navigator.clipboard.writeText(this.textContent);
+			this.style.borderColor = '#1DB954';
+			setTimeout(() => this.style.borderColor = '', 1000);
+		});
+
+		// Copy app name on click
+		appNameHint.addEventListener('click', function() {
 			navigator.clipboard.writeText(this.textContent);
 			this.style.borderColor = '#1DB954';
 			setTimeout(() => this.style.borderColor = '', 1000);
@@ -330,11 +396,11 @@
 		form.addEventListener('submit', async (e) => {
 			e.preventDefault();
 
-			const clientId = document.getElementById('clientId').value.trim();
+			const clientId = clientIdInput.value.trim();
 			const clientSecret = document.getElementById('clientSecret').value.trim();
 
 			if (!clientId || !clientSecret) {
-				showMessage('error', 'Please enter both Client ID and Secret');
+				showMessage('error', 'Please enter Client ID and Secret');
 				return;
 			}
 
@@ -345,7 +411,7 @@
 				const res = await fetch('/submit', {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ clientId, clientSecret })
+					body: JSON.stringify({ appName: 'StreamDeck QuickBits', clientId, clientSecret })
 				});
 
 				const data = await res.json();
