@@ -1,13 +1,11 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolveArtworkPath } from "./plugin-paths";
+import type { SpotifyTrack } from "./types";
 
-const PLAY_OVERLAY = `<svg width="144" height="144" viewBox="0 0 144 144" fill="none" xmlns="http://www.w3.org/2000/svg">
-<path d="M72 120C98.5097 120 120 98.5097 120 72C120 45.4903 98.5097 24 72 24C45.4903 24 24 45.4903 24 72C24 98.5097 45.4903 120 72 120Z" fill="black" fill-opacity="0.6"/>
-<path d="M58 50L96 72L58 94V50Z" fill="white"/>
-</svg>
-`;
+const PLAY_ICON_INNER = `<path d="M54 40l52 32-52 32V40z"/>`;
+const PAUSE_OVERLAY = `<circle fill="#131313" opacity="0.7" fill-rule="nonzero" cx="72" cy="72" r="58"/><g fill="white">${PLAY_ICON_INNER}</g>`;
 
-const pausedOverlayCache = new Map<string, string>();
+const keyImageCache = new Map<string, string>();
 
 function isReadableArtFile(artPath: string): boolean {
 	if (!existsSync(artPath)) {
@@ -33,22 +31,28 @@ function readArtAsBase64(artPath: string): string | null {
 	}
 }
 
-function buildCompositeSvg(base64Album: string, mimeType: string, isPlaying: boolean): string {
-	const overlayPart = isPlaying
-		? ""
-		: `<image xlink:href="data:image/svg+xml;base64,${Buffer.from(PLAY_OVERLAY).toString("base64")}" width="144" height="144"/>`;
+function buildKeySvg(base64Album: string, mimeType: string, isPlaying: boolean): string {
+	const overlayPart = isPlaying ? "" : PAUSE_OVERLAY;
 
-	const compositeSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="144" height="144" viewBox="0 0 144 144">
-		<defs>
-			<clipPath id="rounded">
-				<rect width="144" height="144" rx="12"/>
-			</clipPath>
-		</defs>
-		<image xlink:href="data:${mimeType};base64,${base64Album}" width="144" height="144" clip-path="url(#rounded)"/>
-		${overlayPart}
-	</svg>`;
+	const compositeSvg = `<svg width="144" height="144" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<image x="0" y="0" width="144" height="144" xlink:href="data:${mimeType};base64,${base64Album}"/>
+${overlayPart}
+</svg>`;
 
 	return `data:image/svg+xml;base64,${Buffer.from(compositeSvg).toString("base64")}`;
+}
+
+function artSourceKey(track: SpotifyTrack): string | null {
+	const artPath = resolveTrackArtPath(track.albumArtPath);
+	if (artPath) {
+		return artPath;
+	}
+
+	if (track.albumArtBase64) {
+		return `b64:${track.albumArtBase64.slice(0, 48)}`;
+	}
+
+	return null;
 }
 
 export function resolveTrackArtPath(pathOrRelative: string | undefined): string | null {
@@ -59,36 +63,44 @@ export function resolveTrackArtPath(pathOrRelative: string | undefined): string 
 	return resolveArtworkPath(pathOrRelative);
 }
 
-export function buildPlayingImage(artPath: string): string | null {
-	return isReadableArtFile(artPath) ? artPath : null;
-}
+export function buildNowPlayingKeyImage(track: SpotifyTrack, isPlaying: boolean): string | null {
+	const sourceKey = artSourceKey(track);
+	if (!sourceKey) {
+		return null;
+	}
 
-export function buildPausedOverlay(artPath: string): string | null {
-	const cached = pausedOverlayCache.get(artPath);
+	const cacheKey = `${sourceKey}:${isPlaying}`;
+	const cached = keyImageCache.get(cacheKey);
 	if (cached) {
 		return cached;
 	}
 
-	const base64 = readArtAsBase64(artPath);
+	const artPath = resolveTrackArtPath(track.albumArtPath);
+	let base64: string | null = null;
+	let mimeType = track.albumArtMime || "image/jpeg";
+
+	if (artPath) {
+		base64 = readArtAsBase64(artPath);
+	}
+
+	if (!base64 && track.albumArtBase64) {
+		base64 = track.albumArtBase64;
+		mimeType = track.albumArtMime || "image/jpeg";
+	}
+
 	if (!base64) {
 		return null;
 	}
 
-	const overlay = buildCompositeSvg(base64, "image/jpeg", false);
-	pausedOverlayCache.set(artPath, overlay);
-	return overlay;
-}
+	const image = buildKeySvg(base64, mimeType, isPlaying);
+	keyImageCache.set(cacheKey, image);
 
-export function buildOverlayFromBase64(
-	base64Album: string,
-	mimeType: string,
-	isPlaying: boolean
-): string {
-	return buildCompositeSvg(base64Album, mimeType, isPlaying);
-}
-
-export function prebuildPausedOverlay(artPath: string): void {
-	if (!pausedOverlayCache.has(artPath)) {
-		buildPausedOverlay(artPath);
+	if (keyImageCache.size > 80) {
+		const oldest = keyImageCache.keys().next().value;
+		if (oldest) {
+			keyImageCache.delete(oldest);
+		}
 	}
+
+	return image;
 }

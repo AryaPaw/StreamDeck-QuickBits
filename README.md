@@ -2,7 +2,7 @@
 
 Stream Deck plugin with small Windows-focused utilities: system volume, Do Not Disturb, Skydimo lighting triggers, and Spotify controls (local playback + optional Web API for Like).
 
-**Plugin ID:** `dev.aryapaw.quickbits`  
+**Plugin ID:** `dev.aryapaw.quickbits`
 **Current version:** see [`dev.aryapaw.quickbits.sdPlugin/manifest.json`](dev.aryapaw.quickbits.sdPlugin/manifest.json)
 
 ## Requirements

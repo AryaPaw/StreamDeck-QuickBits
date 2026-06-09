@@ -15,8 +15,8 @@ import type {
 } from "./types";
 
 const TRANSITION_HOLD_MS = 2_000;
-const AUTO_ADVANCE_PLAYING_MS = 5_000;
-const PAUSED_CLEAR_MS = 3_000;
+const AUTO_ADVANCE_PLAYING_MS = 2_000;
+const PAUSED_CLEAR_MS = 2_000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
 const MAX_LIKE_RETRIES = 2;
@@ -307,9 +307,11 @@ class SpotifyState {
 			this.emit(this.currentState);
 		}
 
-		if (trackChanged && track && this.likeSyncRefs > 0) {
+		if (trackChanged && track) {
 			void spotifyLocalClient.refreshArtwork();
-			void this.enrichIsLiked(track, "track-changed");
+			if (this.likeSyncRefs > 0) {
+				void this.enrichIsLiked(track, "track-changed");
+			}
 		}
 	}
 
