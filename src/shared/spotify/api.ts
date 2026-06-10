@@ -9,13 +9,14 @@ import {
 } from "./local/map";
 import { getSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyApiGateway } from "./api-gateway";
-import { spotifyApiMetrics } from "./api-metrics";
 import type { SpotifySettings, SpotifyTrack } from "./types";
 
 const MAX_URI_CACHE_ENTRIES = 200;
 const SEARCH_LIMIT = 10;
+const MAX_SEARCH_QUERIES = 2;
 const PLAYER_RETRY_ATTEMPTS = 3;
 const PLAYER_RETRY_DELAY_MS = 400;
+const PLAYER_RETRY_REASONS = new Set(["track-changed", "like-button-appear", "retry"]);
 
 type SearchTrackItem = {
 	uri: string;
@@ -82,12 +83,17 @@ export class SpotifyAPI {
 		return new Promise((resolve) => setTimeout(resolve, ms));
 	}
 
+	private shouldRetryPlayer(reason: string): boolean {
+		return PLAYER_RETRY_REASONS.has(reason);
+	}
+
 	private async resolvePlayerTrack(
 		settings: SpotifySettings,
 		track: SpotifyTrack,
 		reason: string
 	): Promise<PlayerTrackInfo | null> {
-		for (let attempt = 0; attempt < PLAYER_RETRY_ATTEMPTS; attempt++) {
+		const maxAttempts = this.shouldRetryPlayer(reason) ? PLAYER_RETRY_ATTEMPTS : 1;
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
 			const playerTrack = await this.getPlayerTrack(settings, track);
 			if (playerTrack && metadataMatchesPlayer(track, playerTrack)) {
 				if (attempt > 0) {
@@ -99,10 +105,10 @@ export class SpotifyAPI {
 			}
 			if (playerTrack) {
 				streamDeck.logger.debug(
-					`[Spotify] player mismatch (${reason}) attempt ${attempt + 1}/${PLAYER_RETRY_ATTEMPTS}: gsmtc="${track.name}" player="${playerTrack.name}" by "${playerTrack.artists}" uri=${playerTrack.uri}`
+					`[Spotify] player mismatch (${reason}) attempt ${attempt + 1}/${maxAttempts}: gsmtc="${track.name}" player="${playerTrack.name}" by "${playerTrack.artists}" uri=${playerTrack.uri}`
 				);
 			}
-			if (attempt < PLAYER_RETRY_ATTEMPTS - 1) {
+			if (attempt < maxAttempts - 1) {
 				await this.sleep(PLAYER_RETRY_DELAY_MS);
 			}
 		}
@@ -113,7 +119,7 @@ export class SpotifyAPI {
 		settings: SpotifySettings,
 		uris: string[],
 		track: SpotifyTrack
-	): Promise<boolean[]> {
+	): Promise<boolean[] | null> {
 		if (uris.length === 0) {
 			return [];
 		}
@@ -125,13 +131,13 @@ export class SpotifyAPI {
 			{ reason: "contains-batch", track }
 		);
 		if (!response || !response.ok) {
-			return uris.map(() => false);
+			return null;
 		}
 		try {
 			const data = (await response.json()) as boolean[];
 			return uris.map((_, index) => data[index] === true);
 		} catch {
-			return uris.map(() => false);
+			return null;
 		}
 	}
 
@@ -164,6 +170,12 @@ export class SpotifyAPI {
 		}
 
 		const likedFlags = await this.batchContainsUris(settings, uniqueUris, track);
+		if (likedFlags === null) {
+			streamDeck.logger.warn(
+				`[Spotify] resolveTrackUri (${reason}): batch contains failed for "${track.name}", skipping disambiguation`
+			);
+			return null;
+		}
 		const likedUris = uniqueUris.filter((_, index) => likedFlags[index]);
 		if (likedUris.length === 1) {
 			streamDeck.logger.info(
@@ -495,9 +507,16 @@ export class SpotifyAPI {
 			queries.push(query);
 		};
 
+		const album = track.album.trim();
+
 		if (name && primaryArtist) {
 			add(
 				`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(primaryArtist)}`
+			);
+		}
+		if (name && primaryArtist && album) {
+			add(
+				`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(primaryArtist)} album:${this.quoteSearchField(album)}`
 			);
 		}
 		if (name && artist && artist !== "Unknown") {
@@ -526,12 +545,6 @@ export class SpotifyAPI {
 		if (name && artist && artist !== "Unknown") {
 			add(`${normalizeTrackTitle(name)} ${primaryArtist}`);
 		}
-		const album = track.album.trim();
-		if (name && primaryArtist && album) {
-			add(
-				`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(primaryArtist)} album:${this.quoteSearchField(album)}`
-			);
-		}
 
 		return queries;
 	}
@@ -541,7 +554,7 @@ export class SpotifyAPI {
 		track: SpotifyTrack,
 		reason: string
 	): Promise<string | null> {
-		const queries = this.buildSearchQueries(track);
+		const queries = this.buildSearchQueries(track).slice(0, MAX_SEARCH_QUERIES);
 		if (queries.length === 0) {
 			streamDeck.logger.warn(
 				`[Spotify] resolveTrackUri (${reason}): no query for "${track.name}"`

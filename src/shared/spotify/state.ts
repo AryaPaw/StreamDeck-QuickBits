@@ -96,6 +96,7 @@ class SpotifyState {
 		this.hydrateLikedCache(settings);
 		spotifyAPI.hydrateUriCache(settings);
 		this.refreshLikeApiStatus();
+		this.startLikeInterval();
 
 		const track = this.currentState.track;
 		if (!track) {
@@ -103,7 +104,6 @@ class SpotifyState {
 		}
 
 		this.applyCachedLikeIfAny(track);
-		this.startLikeInterval();
 		void this.enrichIsLiked(track, "like-button-appear");
 	}
 
