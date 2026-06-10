@@ -4,7 +4,7 @@ import { spotifyAPI } from "./api";
 import { spotifyApiMetrics } from "./api-metrics";
 import { spotifyRateLimit } from "./rate-limit";
 import { spotifyLocalClient } from "./local/client";
-import { mapLocalStateToTrack } from "./local/map";
+import { mapLocalStateToTrack, stabilizeTrackIdentity } from "./local/map";
 import type { SpotifyLocalState } from "./local/types";
 import type {
 	SpotifyLikeApiStatus,
@@ -19,6 +19,7 @@ const AUTO_ADVANCE_PLAYING_MS = 2_000;
 const PAUSED_CLEAR_MS = 2_000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
+const LIKE_INTERVAL_MS = 45_000;
 const MAX_LIKE_RETRIES = 2;
 const MAX_LIKED_CACHE_ENTRIES = 200;
 const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
@@ -43,10 +44,12 @@ class SpotifyState {
 	private autoAdvancePlayingUntil = 0;
 	private likedCheckInFlight = false;
 	private likedResultCache = new Map<string, LikedCacheEntry>();
+	private likedByUriCache = new Map<string, LikedCacheEntry>();
 	private likeSyncRefs = 0;
 	private likeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private likeRetryCount = 0;
 	private likeRetryTrackId: string | null = null;
+	private likeIntervalTimer: ReturnType<typeof setInterval> | null = null;
 	private likeCacheHydrated = false;
 	private likeSkipUntil = 0;
 	private playingOptimisticUntil = 0;
@@ -73,11 +76,12 @@ class SpotifyState {
 		};
 	}
 
-	registerLikeSync(): void {
+	registerLikeSync(): Promise<void> {
 		this.likeSyncRefs += 1;
 		if (this.likeSyncRefs === 1) {
-			void this.bootstrapLikeSync();
+			return this.bootstrapLikeSync();
 		}
+		return Promise.resolve();
 	}
 
 	unregisterLikeSync(): void {
@@ -99,6 +103,7 @@ class SpotifyState {
 		}
 
 		this.applyCachedLikeIfAny(track);
+		this.startLikeInterval();
 		void this.enrichIsLiked(track, "like-button-appear");
 	}
 
@@ -129,7 +134,21 @@ class SpotifyState {
 	}
 
 	private rememberLiked(trackId: string, isLiked: boolean): void {
-		this.likedResultCache.set(trackId, { isLiked, at: Date.now() });
+		const entry = { isLiked, at: Date.now() };
+		this.likedResultCache.set(trackId, entry);
+		const uri = spotifyAPI.getCachedUri(trackId);
+		if (uri) {
+			this.likedByUriCache.set(uri, entry);
+		}
+		this.persistLikedCache();
+	}
+
+	private clearLikedCacheForTrack(trackId: string): void {
+		const uri = spotifyAPI.getCachedUri(trackId);
+		this.likedResultCache.delete(trackId);
+		if (uri) {
+			this.likedByUriCache.delete(uri);
+		}
 		this.persistLikedCache();
 	}
 
@@ -143,8 +162,22 @@ class SpotifyState {
 		return this.likedResultCache.get(trackId) ?? null;
 	}
 
+	private getCachedLikeForTrack(track: SpotifyTrack): LikedCacheEntry | null {
+		const byId = this.getCachedLike(track.id);
+		if (byId) {
+			return byId;
+		}
+
+		const uri = spotifyAPI.getCachedUri(track.id);
+		if (uri) {
+			return this.likedByUriCache.get(uri) ?? null;
+		}
+
+		return null;
+	}
+
 	private applyCachedLikeIfAny(track: SpotifyTrack): boolean {
-		const cached = this.getCachedLike(track.id);
+		const cached = this.getCachedLikeForTrack(track);
 		if (!cached) {
 			return false;
 		}
@@ -231,6 +264,7 @@ class SpotifyState {
 			}
 		} else {
 			track = this.applyPlayingGrace(track, local);
+			track = stabilizeTrackIdentity(track, this.currentState.track);
 			if (Date.now() < this.playingOptimisticUntil && this.currentState.track) {
 				if (track.isPlaying === this.currentState.track.isPlaying) {
 					this.playingOptimisticUntil = 0;
@@ -252,7 +286,7 @@ class SpotifyState {
 					this.likeRetryTimer = null;
 				}
 
-				const cached = this.getCachedLike(track.id);
+				const cached = this.getCachedLikeForTrack(track);
 				if (cached) {
 					isLiked = cached.isLiked;
 					likeKnown = true;
@@ -267,15 +301,6 @@ class SpotifyState {
 					this.autoAdvancePlayingUntil = Date.now() + AUTO_ADVANCE_PLAYING_MS;
 					track = { ...track, isPlaying: true };
 				}
-			} else if (this.currentState.track) {
-				track = {
-					...track,
-					artist: track.artist || this.currentState.track.artist,
-					album: track.album || this.currentState.track.album,
-					albumArtPath: track.albumArtPath ?? this.currentState.track.albumArtPath,
-					albumArtBase64: track.albumArtBase64 ?? this.currentState.track.albumArtBase64,
-					albumArtMime: track.albumArtMime ?? this.currentState.track.albumArtMime
-				};
 			}
 		}
 
@@ -320,6 +345,23 @@ class SpotifyState {
 			clearTimeout(this.likeRetryTimer);
 			this.likeRetryTimer = null;
 		}
+		if (this.likeIntervalTimer) {
+			clearInterval(this.likeIntervalTimer);
+			this.likeIntervalTimer = null;
+		}
+	}
+
+	private startLikeInterval(): void {
+		if (this.likeIntervalTimer) {
+			return;
+		}
+		this.likeIntervalTimer = setInterval(() => {
+			const track = this.currentState.track;
+			if (!track || this.likeSyncRefs === 0) {
+				return;
+			}
+			void this.enrichIsLiked(track, "interval");
+		}, LIKE_INTERVAL_MS);
 	}
 
 	private resetLikeRetryState(trackId: string): void {
@@ -363,7 +405,7 @@ class SpotifyState {
 		if (!settings.refreshToken) {
 			return "no_auth";
 		}
-		if (track && this.getCachedLike(track.id)) {
+		if (track && this.getCachedLikeForTrack(track)) {
 			return "ok";
 		}
 		if (spotifyRateLimit.shouldThrottle()) {
@@ -376,7 +418,7 @@ class SpotifyState {
 		if (fetchStatus === "no_auth") {
 			return "no_auth";
 		}
-		if (this.getCachedLike(track.id)) {
+		if (this.getCachedLikeForTrack(track)) {
 			return "ok";
 		}
 		return fetchStatus;
@@ -416,8 +458,7 @@ class SpotifyState {
 			return;
 		}
 
-		const cached = this.getCachedLike(trackId);
-		const uriCached = spotifyAPI.hasCachedUri(trackId);
+		const cached = this.getCachedLikeForTrack(track);
 
 		if (spotifyRateLimit.shouldThrottle()) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:backoff`, "/me/library/contains", "library", trackCtx);
@@ -439,7 +480,7 @@ class SpotifyState {
 			return;
 		}
 
-		if (uriCached && cached) {
+		if (cached) {
 			this.currentState = {
 				...this.currentState,
 				isLiked: cached.isLiked,
@@ -449,7 +490,8 @@ class SpotifyState {
 			this.emit(this.currentState);
 		}
 
-		const isLiked = await this.fetchIsLiked(track, reason, uriCached);
+		const isLiked = await this.fetchIsLiked(track, reason);
+		const resolvedUri = spotifyAPI.getCachedUri(trackId) ?? "unknown";
 		if (trackId !== this.lastTrackId || !this.currentState.track) {
 			return;
 		}
@@ -483,13 +525,13 @@ class SpotifyState {
 
 		if (this.currentState.isLiked === isLiked && this.currentState.likeKnown) {
 			streamDeck.logger.debug(
-				`[Spotify] Like check (${reason}): "${track.name}" unchanged (${isLiked ? "liked" : "not liked"})`
+				`[Spotify] Like check (${reason}): "${track.name}" by "${track.artist}" uri=${resolvedUri} unchanged (${isLiked ? "liked" : "not liked"})`
 			);
 			return;
 		}
 
 		streamDeck.logger.info(
-			`[Spotify] Like check (${reason}): "${track.name}" -> ${isLiked ? "liked" : "not liked"}`
+			`[Spotify] Like check (${reason}): "${track.name}" by "${track.artist}" uri=${resolvedUri} -> ${isLiked ? "liked" : "not liked"}`
 		);
 		this.currentState = {
 			...this.currentState,
@@ -500,11 +542,7 @@ class SpotifyState {
 		this.emit(this.currentState);
 	}
 
-	private async fetchIsLiked(
-		track: SpotifyTrack,
-		reason: string,
-		uriCached: boolean
-	): Promise<boolean | null> {
+	private async fetchIsLiked(track: SpotifyTrack, reason: string): Promise<boolean | null> {
 		const settings = getSpotifySettings();
 		if (!settings.refreshToken) {
 			streamDeck.logger.warn(
@@ -513,11 +551,18 @@ class SpotifyState {
 			return null;
 		}
 
+		const oldUri = spotifyAPI.getCachedUri(track.id);
 		this.likedCheckInFlight = true;
 		try {
-			return await spotifyAPI.isTrackLiked(settings, track, reason, {
-				skipSearch: uriCached
-			});
+			const result = await spotifyAPI.isTrackLiked(settings, track, reason);
+			const newUri = spotifyAPI.getCachedUri(track.id);
+			if (newUri && oldUri && newUri !== oldUri) {
+				this.clearLikedCacheForTrack(track.id);
+				streamDeck.logger.info(
+					`[Spotify] URI changed for "${track.name}": ${oldUri} -> ${newUri}, cleared liked cache`
+				);
+			}
+			return result;
 		} finally {
 			this.likedCheckInFlight = false;
 		}

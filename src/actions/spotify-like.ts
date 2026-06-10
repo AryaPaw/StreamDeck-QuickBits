@@ -20,12 +20,14 @@ const LIKE_API_UNAVAILABLE_IMAGE = "imgs/actions/spotify/like-api-unavailable";
 export class SpotifyLikeAction extends SingletonAction {
 	private currentAction: WillAppearEvent["action"] | null = null;
 	private unsubscribe: (() => void) | null = null;
+	private renderSerial = 0;
 
 	override async onWillAppear(ev: WillAppearEvent): Promise<void> {
 		this.currentAction = ev.action;
 		await loadSpotifySettings();
-		spotifyState.registerLikeSync();
 		this.unsubscribe = spotifyState.subscribe((state) => this.onStateChange(state));
+		await spotifyState.registerLikeSync();
+		await this.renderLikeKey(spotifyState.getState());
 	}
 
 	override async onWillDisappear(): Promise<void> {
@@ -72,9 +74,22 @@ export class SpotifyLikeAction extends SingletonAction {
 	private async renderLikeKey(state: SpotifyPlaybackState): Promise<void> {
 		if (!this.currentAction) return;
 
+		const serial = ++this.renderSerial;
 		await this.currentAction.setTitle("");
 
+		if (serial !== this.renderSerial) {
+			return;
+		}
+
 		if (state.likeApiStatus === "no_auth") {
+			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
+			return;
+		}
+
+		if (
+			!state.likeKnown &&
+			(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited")
+		) {
 			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
 			return;
 		}

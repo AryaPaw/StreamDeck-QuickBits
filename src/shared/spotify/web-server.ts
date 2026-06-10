@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import streamDeck from "@elgato/streamdeck";
 import { spotifyApiGateway } from "./api-gateway";
 import { spotifyApiMetrics } from "./api-metrics";
+import { spotifyAPI } from "./api";
 import { spotifyAuth, REDIRECT_URI, SCOPES } from "./auth";
-import { loadSpotifySettings } from "./settings";
+import { loadSpotifySettings, saveSpotifySettings } from "./settings";
 
 function isLocalhost(req: IncomingMessage): boolean {
 	const addr = req.socket.remoteAddress;
@@ -158,7 +159,15 @@ class SpotifyWebServer {
 				);
 
 				if (newSettings?.refreshToken) {
-					spotifyAuth.notifySettingsReceived(newSettings);
+					const profile = await spotifyAPI.fetchUserProfile(newSettings);
+					const enrichedSettings = {
+						...newSettings,
+						...(profile?.display_name ? { accountDisplayName: profile.display_name } : {})
+					};
+					if (profile?.display_name) {
+						await saveSpotifySettings(enrichedSettings);
+					}
+					spotifyAuth.notifySettingsReceived(enrichedSettings);
 					res.writeHead(302, { Location: "/?success=true" });
 					res.end();
 				} else {

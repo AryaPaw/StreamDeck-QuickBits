@@ -57,7 +57,7 @@
     <sdpi-wrapper>
         <div class="instructions">
             <p><strong>Playback</strong> (now playing, play/pause, next/previous) works via the local Spotify desktop app — no API keys required.</p>
-            <p><strong>Like</strong> requires Spotify Web API authorization below.</p>
+            <p><strong>Like</strong> requires Spotify Web API authorization below. Like checks the <strong>Liked Songs</strong> library of the authorized account — it must match your Spotify desktop login.</p>
             <h3>How to get Spotify API credentials:</h3>
             <ol>
                 <li>Go to <a href="https://developer.spotify.com/dashboard" target="_blank">developer.spotify.com/dashboard</a></li>
@@ -89,18 +89,25 @@
         <div id="status" class="status disconnected">
             Status: Not connected
         </div>
+        <div id="account-hint" class="instructions" style="margin-top: 8px; display: none;">
+            Like uses this Spotify account's Liked Songs. If likes look wrong, re-authorize with the same account as Spotify desktop.
+        </div>
     </sdpi-wrapper>
 
     <script>
         const statusEl = document.getElementById('status');
+        const accountHintEl = document.getElementById('account-hint');
         const authorizeBtn = document.getElementById('authorize-btn');
         let sdConnection = null;
         let actionInfo = null;
         let currentSettings = {};
 
-        function updateStatus(connected, message) {
+        function updateStatus(connected, message, displayName) {
             statusEl.className = 'status ' + (connected ? 'connected' : 'disconnected');
             statusEl.textContent = 'Status: ' + message;
+            if (accountHintEl) {
+                accountHintEl.style.display = connected ? 'block' : 'none';
+            }
         }
 
         function updateAuthorizeButton() {
@@ -125,7 +132,11 @@
                 const data = JSON.parse(evt.data);
                 if (data.event === 'sendToPropertyInspector') {
                     if (data.payload && data.payload.status) {
-                        updateStatus(data.payload.status === 'connected', data.payload.message || data.payload.status);
+                        updateStatus(
+                            data.payload.status === 'connected',
+                            data.payload.message || data.payload.status,
+                            data.payload.displayName
+                        );
                     }
                 }
                 if (data.event === 'didReceiveSettings') {

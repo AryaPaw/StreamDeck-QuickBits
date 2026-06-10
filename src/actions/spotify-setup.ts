@@ -6,7 +6,7 @@ import streamDeck, {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
-import { spotifyAuth, loadSpotifySettings, saveSpotifySettings, getSpotifySettings, spotifyWebServer } from "../shared/spotify";
+import { spotifyAuth, loadSpotifySettings, saveSpotifySettings, spotifyWebServer, spotifyAPI } from "../shared/spotify";
 
 type SpotifySetupActionSettings = {
 	clientId?: string;
@@ -31,13 +31,32 @@ export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettin
 			if (this.currentAction) {
 				await this.currentAction.setTitle("✓");
 			}
-			this.sendConnectionStatus(true);
+			this.sendConnectionStatus(true, undefined, newSettings.accountDisplayName);
 		});
 	}
 
 	override onPropertyInspectorDidAppear(_ev: PropertyInspectorDidAppearEvent): void {
-		const settings = getSpotifySettings();
-		this.sendConnectionStatus(!!settings.refreshToken);
+		void this.refreshConnectionStatus();
+	}
+
+	private async refreshConnectionStatus(): Promise<void> {
+		const settings = await loadSpotifySettings();
+		const connected = !!settings.refreshToken;
+		let displayName = settings.accountDisplayName;
+
+		if (connected && !displayName) {
+			const profile = await spotifyAPI.fetchUserProfile(settings);
+			if (profile?.display_name) {
+				displayName = profile.display_name;
+				await saveSpotifySettings({ ...settings, accountDisplayName: profile.display_name });
+			}
+		}
+
+		this.sendConnectionStatus(
+			connected,
+			connected ? undefined : "Not connected",
+			displayName
+		);
 	}
 
 	override async onSendToPlugin(ev: SendToPluginEvent<SpotifySetupPiMessage, SpotifySetupActionSettings>): Promise<void> {
@@ -92,10 +111,16 @@ export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettin
 		}
 	}
 
-	private sendConnectionStatus(connected: boolean, message?: string): void {
+	private sendConnectionStatus(connected: boolean, message?: string, displayName?: string): void {
+		const defaultMessage = connected
+			? displayName
+				? `Connected as ${displayName}`
+				: "Connected to Spotify!"
+			: "Not connected";
 		streamDeck.ui.sendToPropertyInspector({
 			status: connected ? "connected" : "disconnected",
-			message: message ?? (connected ? "Connected to Spotify!" : "Not connected")
+			message: message ?? defaultMessage,
+			displayName: displayName ?? ""
 		});
 	}
 }

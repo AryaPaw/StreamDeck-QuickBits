@@ -1,10 +1,37 @@
 import streamDeck from "@elgato/streamdeck";
+import {
+	artistMatchesGsmtc,
+	isSameAlbumName,
+	isSameTrackTitle,
+	metadataMatchesPlayer,
+	normalizeArtistKey,
+	normalizeTrackTitle
+} from "./local/map";
 import { getSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyApiGateway } from "./api-gateway";
 import { spotifyApiMetrics } from "./api-metrics";
 import type { SpotifySettings, SpotifyTrack } from "./types";
 
 const MAX_URI_CACHE_ENTRIES = 200;
+const SEARCH_LIMIT = 10;
+const PLAYER_RETRY_ATTEMPTS = 3;
+const PLAYER_RETRY_DELAY_MS = 400;
+
+type SearchTrackItem = {
+	uri: string;
+	name: string;
+	artists: { name: string }[];
+	album?: { name: string; album_type?: string };
+	external_ids?: { isrc?: string };
+};
+
+type PlayerTrackInfo = {
+	uri: string;
+	name: string;
+	artists: string;
+	album: string;
+};
+
 
 export class SpotifyAPI {
 	private uriCache = new Map<string, string>();
@@ -13,6 +40,10 @@ export class SpotifyAPI {
 
 	hasCachedUri(trackId: string): boolean {
 		return this.uriCache.has(trackId);
+	}
+
+	getCachedUri(trackId: string): string | undefined {
+		return this.uriCache.get(trackId);
 	}
 
 	hydrateUriCache(settings: SpotifySettings): void {
@@ -40,9 +71,118 @@ export class SpotifyAPI {
 		});
 	}
 
-	private rememberUri(trackId: string, uri: string): void {
+	private rememberUri(trackId: string, uri: string): string | undefined {
+		const previous = this.uriCache.get(trackId);
 		this.uriCache.set(trackId, uri);
 		this.persistUriCache();
+		return previous !== uri ? previous : undefined;
+	}
+
+	private sleep(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	private async resolvePlayerTrack(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		reason: string
+	): Promise<PlayerTrackInfo | null> {
+		for (let attempt = 0; attempt < PLAYER_RETRY_ATTEMPTS; attempt++) {
+			const playerTrack = await this.getPlayerTrack(settings, track);
+			if (playerTrack && metadataMatchesPlayer(track, playerTrack)) {
+				if (attempt > 0) {
+					streamDeck.logger.info(
+						`[Spotify] player matched (${reason}) on attempt ${attempt + 1} for "${track.name}" -> ${playerTrack.uri}`
+					);
+				}
+				return playerTrack;
+			}
+			if (playerTrack) {
+				streamDeck.logger.debug(
+					`[Spotify] player mismatch (${reason}) attempt ${attempt + 1}/${PLAYER_RETRY_ATTEMPTS}: gsmtc="${track.name}" player="${playerTrack.name}" by "${playerTrack.artists}" uri=${playerTrack.uri}`
+				);
+			}
+			if (attempt < PLAYER_RETRY_ATTEMPTS - 1) {
+				await this.sleep(PLAYER_RETRY_DELAY_MS);
+			}
+		}
+		return null;
+	}
+
+	private async batchContainsUris(
+		settings: SpotifySettings,
+		uris: string[],
+		track: SpotifyTrack
+	): Promise<boolean[]> {
+		if (uris.length === 0) {
+			return [];
+		}
+		const joined = uris.map((uri) => encodeURIComponent(uri)).join(",");
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/me/library/contains?uris=${joined}`,
+			undefined,
+			{ reason: "contains-batch", track }
+		);
+		if (!response || !response.ok) {
+			return uris.map(() => false);
+		}
+		try {
+			const data = (await response.json()) as boolean[];
+			return uris.map((_, index) => data[index] === true);
+		} catch {
+			return uris.map(() => false);
+		}
+	}
+
+	private async pickUriFromSearchCandidates(
+		settings: SpotifySettings,
+		items: SearchTrackItem[],
+		track: SpotifyTrack,
+		reason: string
+	): Promise<string | null> {
+		const scored = items
+			.map((item) => ({ item, score: this.scoreSearchCandidate(item, track) }))
+			.filter((entry) => entry.score >= 0)
+			.sort((a, b) => b.score - a.score);
+
+		if (scored.length === 0) {
+			return null;
+		}
+
+		const uniqueUris: string[] = [];
+		const uriToItem = new Map<string, SearchTrackItem>();
+		for (const entry of scored) {
+			if (!uriToItem.has(entry.item.uri)) {
+				uriToItem.set(entry.item.uri, entry.item);
+				uniqueUris.push(entry.item.uri);
+			}
+		}
+
+		if (uniqueUris.length === 1) {
+			return uniqueUris[0] ?? null;
+		}
+
+		const likedFlags = await this.batchContainsUris(settings, uniqueUris, track);
+		const likedUris = uniqueUris.filter((_, index) => likedFlags[index]);
+		if (likedUris.length === 1) {
+			streamDeck.logger.info(
+				`[Spotify] resolveTrackUri (${reason}): uri-source=search-liked-pick "${track.name}" -> ${likedUris[0]} (1 liked among ${uniqueUris.length} candidates)`
+			);
+			return likedUris[0] ?? null;
+		}
+		if (likedUris.length > 1) {
+			const likedSet = new Set(likedUris);
+			const bestLiked = scored.find((entry) => likedSet.has(entry.item.uri));
+			if (bestLiked) {
+				streamDeck.logger.info(
+					`[Spotify] resolveTrackUri (${reason}): uri-source=search-liked-pick "${track.name}" -> ${bestLiked.item.uri} (${likedUris.length} liked, picked best score)`
+				);
+				return bestLiked.item.uri;
+			}
+		}
+
+		return scored[0]?.item.uri ?? null;
 	}
 
 	private trackContext(track: SpotifyTrack): { title: string; artist: string } {
@@ -64,6 +204,76 @@ export class SpotifyAPI {
 			priority: options?.bypassQuota ? "manual" : "normal",
 			track: options?.track ? this.trackContext(options.track) : undefined
 		});
+	}
+
+	async fetchUserProfile(
+		settings: SpotifySettings
+	): Promise<{ display_name: string; id: string } | null> {
+		const response = await this.requestWithAuth(settings, "https://api.spotify.com/v1/me", undefined, {
+			reason: "profile"
+		});
+		if (!response || !response.ok) {
+			return null;
+		}
+		try {
+			const data = (await response.json()) as { display_name?: string; id?: string };
+			if (!data.display_name || !data.id) {
+				return null;
+			}
+			return { display_name: data.display_name, id: data.id };
+		} catch {
+			return null;
+		}
+	}
+
+	private async getPlayerTrack(
+		settings: SpotifySettings,
+		track: SpotifyTrack
+	): Promise<PlayerTrackInfo | null> {
+		const response = await this.requestWithAuth(
+			settings,
+			"https://api.spotify.com/v1/me/player",
+			undefined,
+			{ reason: "player", track }
+		);
+		if (!response) {
+			return null;
+		}
+		if (response.status === 204) {
+			return null;
+		}
+		if (!response.ok) {
+			streamDeck.logger.debug(
+				`[Spotify] getPlayerTrack: ${response.status} ${await response.text()}`
+			);
+			return null;
+		}
+
+		try {
+			const data = (await response.json()) as {
+				item?: {
+					type?: string;
+					uri?: string;
+					name?: string;
+					artists?: { name: string }[];
+					album?: { name?: string };
+				} | null;
+			};
+			const item = data.item;
+			if (!item || item.type !== "track" || !item.uri || !item.name) {
+				return null;
+			}
+			const artists = (item.artists ?? []).map((artist) => artist.name).join(", ");
+			return {
+				uri: item.uri,
+				name: item.name,
+				artists,
+				album: item.album?.name ?? ""
+			};
+		} catch (e) {
+			streamDeck.logger.error("[Spotify] getPlayerTrack parse error: " + e);
+			return null;
+		}
 	}
 
 	private async isSavedUri(
@@ -137,50 +347,239 @@ export class SpotifyAPI {
 		return true;
 	}
 
-	private async searchTrackUri(
+	private stripApostrophes(value: string): string {
+		return value.replace(/[\u2018\u2019']/g, "");
+	}
+
+	private simplifyTrackTitle(title: string): string {
+		return title
+			.replace(/\s*\([^)]*from[^)]*\)\s*/gi, " ")
+			.replace(/\s*\([^)]*tribute[^)]*\)\s*/gi, " ")
+			.replace(/\s*\[[^\]]*\]\s*/g, " ")
+			.replace(/\s+/g, " ")
+			.trim();
+	}
+
+	private titleMatches(expected: string, candidate: string): boolean {
+		if (isSameTrackTitle(expected, candidate)) {
+			return true;
+		}
+		const simplifiedExpected = this.simplifyTrackTitle(expected);
+		const simplifiedCandidate = this.simplifyTrackTitle(candidate);
+		if (
+			simplifiedExpected &&
+			simplifiedCandidate &&
+			isSameTrackTitle(simplifiedExpected, simplifiedCandidate)
+		) {
+			return true;
+		}
+		const normalizedExpected = normalizeTrackTitle(expected);
+		const normalizedCandidate = normalizeTrackTitle(candidate);
+		return (
+			normalizedExpected.includes(normalizedCandidate) ||
+			normalizedCandidate.includes(normalizedExpected)
+		);
+	}
+
+	private scoreSearchCandidate(item: SearchTrackItem, track: SpotifyTrack): number {
+		if (!this.titleMatches(track.name, item.name)) {
+			return -1;
+		}
+
+		let score = 10;
+		if (this.artistMatches(item.artists, track.artist)) {
+			score += 20;
+		} else if (!track.artist || track.artist === "Unknown") {
+			score += 5;
+		} else {
+			return -1;
+		}
+
+		const gsmtcAlbum = track.album.trim();
+		const itemAlbum = item.album?.name?.trim() ?? "";
+		if (gsmtcAlbum && itemAlbum && isSameAlbumName(gsmtcAlbum, itemAlbum)) {
+			score += 15;
+		} else if (
+			gsmtcAlbum &&
+			itemAlbum &&
+			(isSameAlbumName(gsmtcAlbum, track.name) || isSameAlbumName(itemAlbum, track.name))
+		) {
+			score += 8;
+		}
+
+		if (item.album?.album_type === "single" && gsmtcAlbum && isSameAlbumName(gsmtcAlbum, itemAlbum)) {
+			score += 3;
+		}
+
+		return score;
+	}
+
+	private artistMatches(artists: { name: string }[], expected: string): boolean {
+		return artistMatchesGsmtc(
+			artists.map((artist) => artist.name),
+			expected
+		);
+	}
+
+	private logSearchCandidates(items: SearchTrackItem[], track: SpotifyTrack, reason: string): void {
+		if (items.length === 0) {
+			return;
+		}
+		const lines = items.map((item) => {
+			const artists = item.artists.map((artist) => artist.name).join(", ");
+			const album = item.album?.name ?? "";
+			const albumType = item.album?.album_type ?? "";
+			const score = this.scoreSearchCandidate(item, track);
+			return `${score >= 0 ? score : "skip"} | ${item.name} | ${artists} | ${album} (${albumType}) | ${item.uri}`;
+		});
+		streamDeck.logger.debug(
+			`[Spotify] resolveTrackUri (${reason}) candidates:\n  ${lines.join("\n  ")}`
+		);
+	}
+
+	private async searchTrackCandidates(
 		settings: SpotifySettings,
 		query: string,
 		reason: string,
 		track: SpotifyTrack
-	): Promise<string | null> {
-		const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=1`;
+	): Promise<SearchTrackItem[]> {
+		const url = `https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=${SEARCH_LIMIT}`;
 		const response = await this.requestWithAuth(settings, url, undefined, {
 			reason: `search:${reason}`,
 			track
 		});
 		if (!response) {
 			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): search blocked or failed`);
-			return null;
+			return [];
 		}
 		if (response.status === 429) {
 			streamDeck.logger.warn(`[Spotify] resolveTrackUri (${reason}): search rate limited`);
-			return null;
+			return [];
 		}
 		if (!response.ok) {
 			streamDeck.logger.error(
 				`[Spotify] resolveTrackUri (${reason}): ${response.status} ${await response.text()}`
 			);
-			return null;
+			return [];
 		}
 
 		try {
 			const data = (await response.json()) as {
-				tracks?: { items?: { uri: string }[] };
+				tracks?: { items?: SearchTrackItem[] };
 			};
-			return data.tracks?.items?.[0]?.uri ?? null;
+			return data.tracks?.items ?? [];
 		} catch (e) {
 			streamDeck.logger.error("[Spotify] resolveTrackUri parse error: " + e);
-			return null;
+			return [];
 		}
 	}
 
-	private buildSearchQuery(track: SpotifyTrack): string | null {
+	private quoteSearchField(value: string): string {
+		return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+	}
+
+	private buildSearchQueries(track: SpotifyTrack): string[] {
 		const name = track.name.trim();
 		const artist = track.artist.trim();
-		if (!name || !artist) {
-			return name ? `track:"${name}"` : null;
+		const primaryArtist = normalizeArtistKey(artist);
+		const simplifiedName = this.simplifyTrackTitle(name);
+		const nameNoApostrophe = this.stripApostrophes(name);
+		const queries: string[] = [];
+		const seen = new Set<string>();
+
+		const add = (query: string | null) => {
+			if (!query || seen.has(query)) {
+				return;
+			}
+			seen.add(query);
+			queries.push(query);
+		};
+
+		if (name && primaryArtist) {
+			add(
+				`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(primaryArtist)}`
+			);
 		}
-		return `track:"${name}" artist:"${artist}"`;
+		if (name && artist && artist !== "Unknown") {
+			add(`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(artist)}`);
+		}
+		if (nameNoApostrophe && primaryArtist && nameNoApostrophe !== name) {
+			add(
+				`track:${this.quoteSearchField(nameNoApostrophe)} artist:${this.quoteSearchField(primaryArtist)}`
+			);
+			add(`track:${nameNoApostrophe} artist:${primaryArtist}`);
+		}
+		if (name && primaryArtist) {
+			add(`track:${name} artist:${primaryArtist}`);
+		}
+		if (simplifiedName && simplifiedName !== name && artist && artist !== "Unknown") {
+			add(
+				`track:${this.quoteSearchField(simplifiedName)} artist:${this.quoteSearchField(artist)}`
+			);
+		}
+		if (nameNoApostrophe && nameNoApostrophe !== name) {
+			add(`track:${this.quoteSearchField(nameNoApostrophe)}`);
+		}
+		if (name) {
+			add(`track:${this.quoteSearchField(name)}`);
+		}
+		if (name && artist && artist !== "Unknown") {
+			add(`${normalizeTrackTitle(name)} ${primaryArtist}`);
+		}
+		const album = track.album.trim();
+		if (name && primaryArtist && album) {
+			add(
+				`track:${this.quoteSearchField(name)} artist:${this.quoteSearchField(primaryArtist)} album:${this.quoteSearchField(album)}`
+			);
+		}
+
+		return queries;
+	}
+
+	private async searchResolveTrackUri(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		reason: string
+	): Promise<string | null> {
+		const queries = this.buildSearchQueries(track);
+		if (queries.length === 0) {
+			streamDeck.logger.warn(
+				`[Spotify] resolveTrackUri (${reason}): no query for "${track.name}"`
+			);
+			return null;
+		}
+
+		const allCandidates: SearchTrackItem[] = [];
+		const seenUris = new Set<string>();
+
+		for (const query of queries) {
+			const items = await this.searchTrackCandidates(settings, query, reason, track);
+			for (const item of items) {
+				if (!seenUris.has(item.uri)) {
+					seenUris.add(item.uri);
+					allCandidates.push(item);
+				}
+			}
+			if (allCandidates.length >= SEARCH_LIMIT) {
+				break;
+			}
+		}
+
+		if (allCandidates.length === 0) {
+			streamDeck.logger.warn(
+				`[Spotify] resolveTrackUri (${reason}): no search match for "${track.name}" by "${track.artist}"`
+			);
+			return null;
+		}
+
+		this.logSearchCandidates(allCandidates, track, reason);
+		const uri = await this.pickUriFromSearchCandidates(settings, allCandidates, track, reason);
+		if (uri) {
+			streamDeck.logger.debug(
+				`[Spotify] resolveTrackUri (${reason}): uri-source=search "${track.name}" -> ${uri}`
+			);
+		}
+		return uri;
 	}
 
 	private async resolveTrackUriInner(
@@ -188,26 +587,35 @@ export class SpotifyAPI {
 		track: SpotifyTrack,
 		reason: string
 	): Promise<string | null> {
-		const query = this.buildSearchQuery(track);
-		if (!query) {
-			streamDeck.logger.warn(
-				`[Spotify] resolveTrackUri (${reason}): no query for "${track.name}"`
+		const previousUri = this.uriCache.get(track.id);
+
+		const playerTrack = await this.resolvePlayerTrack(settings, track, reason);
+		if (playerTrack) {
+			const replaced = this.rememberUri(track.id, playerTrack.uri);
+			streamDeck.logger.info(
+				`[Spotify] resolveTrackUri (${reason}): uri-source=player "${track.name}" -> ${playerTrack.uri}${replaced ? ` (was ${replaced})` : ""}`
 			);
-			return null;
+			return playerTrack.uri;
 		}
 
-		const uri = await this.searchTrackUri(settings, query, reason, track);
-		if (uri) {
-			this.rememberUri(track.id, uri);
+		const searchUri = await this.searchResolveTrackUri(settings, track, reason);
+		if (searchUri) {
+			const replaced = this.rememberUri(track.id, searchUri);
+			if (replaced && replaced !== searchUri) {
+				streamDeck.logger.info(
+					`[Spotify] resolveTrackUri (${reason}): uri-source=search replaced cached ${replaced} -> ${searchUri}`
+				);
+			}
+			return searchUri;
+		}
+
+		if (previousUri) {
 			streamDeck.logger.debug(
-				`[Spotify] resolveTrackUri (${reason}): "${track.name}" -> ${uri}`
+				`[Spotify] resolveTrackUri (${reason}): uri-source=cache-fallback "${track.name}" -> ${previousUri}`
 			);
-			return uri;
+			return previousUri;
 		}
 
-		streamDeck.logger.warn(
-			`[Spotify] resolveTrackUri (${reason}): no match for "${track.name}" by "${track.artist}"`
-		);
 		return null;
 	}
 
@@ -218,19 +626,6 @@ export class SpotifyAPI {
 	): Promise<string | null> {
 		if (track.uri.startsWith("spotify:")) {
 			return track.uri;
-		}
-
-		const cached = this.uriCache.get(track.id);
-		if (cached) {
-			spotifyApiMetrics.record({
-				kind: "cache_hit",
-				bucket: "search",
-				method: "GET",
-				endpoint: "/v1/search",
-				reason: `uri-cache:${reason}`,
-				track: this.trackContext(track)
-			});
-			return cached;
 		}
 
 		const inflight = this.resolveInFlight.get(track.id);
@@ -264,19 +659,14 @@ export class SpotifyAPI {
 		settings: SpotifySettings,
 		track: SpotifyTrack,
 		reason = "unknown",
-		options?: { skipSearch?: boolean; bypassContainsThrottle?: boolean }
+		options?: { bypassContainsThrottle?: boolean }
 	): Promise<boolean | null> {
 		let uri: string | null = null;
 
 		if (track.uri.startsWith("spotify:")) {
 			uri = track.uri;
 		} else {
-			const cached = this.uriCache.get(track.id);
-			if (cached) {
-				uri = cached;
-			} else if (!options?.skipSearch) {
-				uri = await this.resolveTrackUri(settings, track, reason);
-			}
+			uri = await this.resolveTrackUri(settings, track, reason);
 		}
 
 		if (!uri) {

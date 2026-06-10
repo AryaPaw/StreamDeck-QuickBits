@@ -12,6 +12,7 @@ export type SpotifySettings = {
 	tokenExpiry?: number;
 	likedCache?: Record<string, SpotifyLikedCacheEntry>;
 	trackUriCache?: Record<string, string>;
+	accountDisplayName?: string;
 };
 
 export type SpotifyTrack = {
