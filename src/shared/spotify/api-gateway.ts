@@ -31,8 +31,6 @@ function endpointLabel(url: string): string {
 	}
 }
 
-const DAILY_REQUEST_LIMIT = 200;
-
 class SpotifyApiGateway {
 	private requestTimestamps: number[] = [];
 	private inflight = new Map<string, Promise<Response | null>>();
@@ -68,7 +66,10 @@ class SpotifyApiGateway {
 
 	getDailyRequestCount(): { count: number; limit: number } {
 		this.trimDailyCounter();
-		return { count: this.dailyRequestCount, limit: DAILY_REQUEST_LIMIT };
+		return {
+			count: this.dailyRequestCount,
+			limit: SPOTIFY_WEB_API_LIMITS.dailyRequestLimit
+		};
 	}
 
 	private dailyKey(): string {
@@ -87,16 +88,16 @@ class SpotifyApiGateway {
 	private recordDailyRequest(): void {
 		this.trimDailyCounter();
 		this.dailyRequestCount += 1;
-		if (this.dailyRequestCount === 100) {
+		if (this.dailyRequestCount === SPOTIFY_WEB_API_LIMITS.dailyRequestWarnAt) {
 			streamDeck.logger.warn(
-				`[Spotify] Daily Web API usage at ${this.dailyRequestCount}/${DAILY_REQUEST_LIMIT}`
+				`[Spotify] Daily Web API usage at ${this.dailyRequestCount}/${SPOTIFY_WEB_API_LIMITS.dailyRequestLimit}`
 			);
 		}
 	}
 
 	private isDailyCapExceeded(): boolean {
 		this.trimDailyCounter();
-		return this.dailyRequestCount >= DAILY_REQUEST_LIMIT;
+		return this.dailyRequestCount >= SPOTIFY_WEB_API_LIMITS.dailyRequestLimit;
 	}
 
 	private shouldBypassQuota(options: ApiGatewayOptions): boolean {

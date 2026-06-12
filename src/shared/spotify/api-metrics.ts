@@ -232,7 +232,7 @@ class SpotifyApiMetrics {
 			perMinute: perBucket,
 			requestsToday: {
 				count: requestsToday?.count ?? 0,
-				limit: requestsToday?.limit ?? 200
+				limit: requestsToday?.limit ?? 300
 			},
 			eventCount: events.length
 		};

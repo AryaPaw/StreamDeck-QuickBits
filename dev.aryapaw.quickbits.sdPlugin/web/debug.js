@@ -71,10 +71,9 @@ function renderStats(metrics) {
 	const { rolling30s, backoff, requestsToday } = metrics;
 	statsEl.innerHTML = `
 		<div class="stat"><label>API (30s)</label><strong>${rolling30s.total}/${rolling30s.limit}</strong></div>
-		<div class="stat"><label>Calls today</label><strong>${requestsToday?.count ?? 0}/${requestsToday?.limit ?? 200}</strong></div>
+		<div class="stat"><label>Plugin cap today</label><strong>${requestsToday?.count ?? 0}/${requestsToday?.limit ?? 300}</strong></div>
 		<div class="stat"><label>Events in window</label><strong>${metrics.eventCount}</strong></div>
 		<div class="stat"><label>429 backoff</label><strong>${fmtMs(backoff.blockedMs)}</strong></div>
-		<div class="stat"><label>Request limit</label><strong>${backoff.requestLimit}/30s</strong></div>
 	`;
 
 	if (backoff.blockedMs > 0) {
