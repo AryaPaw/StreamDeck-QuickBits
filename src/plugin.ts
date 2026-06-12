@@ -10,6 +10,7 @@ import { SpotifyPreviousAction } from "./actions/spotify-previous";
 import { SpotifyNextAction } from "./actions/spotify-next";
 import { SpotifyLikeAction } from "./actions/spotify-like";
 import { loadSpotifySettings, spotifyWebServer, spotifyApiMetrics } from "./shared/spotify";
+import { spotifyRateLimit } from "./shared/spotify/rate-limit";
 
 streamDeck.actions.registerAction(new SetVolumeAction());
 streamDeck.actions.registerAction(new ToggleDndAction());
@@ -22,8 +23,9 @@ streamDeck.actions.registerAction(new SpotifyNextAction());
 streamDeck.actions.registerAction(new SpotifyLikeAction());
 
 // Load Spotify settings after connect
-streamDeck.connect().then(() => {
-	loadSpotifySettings();
+streamDeck.connect().then(async () => {
+	const settings = await loadSpotifySettings();
+	spotifyRateLimit.hydrateFromSettings(settings);
 	spotifyWebServer.ensure();
 	void spotifyApiMetrics.hydrate();
 	void runSkydimoStartupStaticBootstrap(skydimoLightingAction);

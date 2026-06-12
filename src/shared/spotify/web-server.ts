@@ -70,7 +70,13 @@ class SpotifyWebServer {
 
 		if (url.pathname === "/debug/api/metrics" && req.method === "GET") {
 			const rolling30s = spotifyApiGateway.getRollingCounts();
-			jsonResponse(res, 200, spotifyApiMetrics.getMetricsSnapshot(rolling30s));
+			const hours = Math.min(
+				24,
+				Math.max(1, Number.parseInt(url.searchParams.get("hours") ?? "1", 10) || 1)
+			);
+			const daily = spotifyApiGateway.getDailyRequestCount();
+			const snapshot = await spotifyApiMetrics.getMetricsSnapshot(rolling30s, hours, daily);
+			jsonResponse(res, 200, snapshot);
 			return;
 		}
 

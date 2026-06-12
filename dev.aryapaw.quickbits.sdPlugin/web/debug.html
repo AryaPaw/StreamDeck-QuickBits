@@ -49,10 +49,30 @@
 			padding: 20px;
 			margin-bottom: 20px;
 		}
-		.panel h2 { font-size: 15px; margin-bottom: 14px; font-weight: 600; }
+		.panel-head {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			flex-wrap: wrap;
+			gap: 12px;
+			margin-bottom: 14px;
+		}
+		.panel-head h2 { font-size: 15px; font-weight: 600; }
+		.panel-actions {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			flex-shrink: 0;
+		}
+		.panel-actions label {
+			color: #888;
+			font-size: 13px;
+			white-space: nowrap;
+		}
 		.filters {
 			display: flex;
 			flex-wrap: wrap;
+			align-items: center;
 			gap: 10px;
 			margin-bottom: 14px;
 		}
@@ -64,6 +84,7 @@
 			padding: 8px 12px;
 			font-family: inherit;
 			font-size: 13px;
+			line-height: 1.2;
 		}
 		button { cursor: pointer; }
 		button:hover { border-color: #1DB954; }
@@ -83,7 +104,8 @@
 		.kind-429 { color: #f87171; }
 		.kind-cache_hit { color: #60a5fa; }
 		.backoff-warn { color: #f87171; font-size: 13px; margin-top: 8px; }
-		canvas { max-height: 260px; }
+		.chart-wrap { position: relative; height: 280px; width: 100%; }
+		.chart-wrap canvas { max-height: 100%; }
 	</style>
 </head>
 <body>
@@ -100,15 +122,29 @@
 	<div class="stats" id="stats"></div>
 
 	<div class="panel">
-		<h2>Requests per minute (last hour)</h2>
-		<canvas id="chart"></canvas>
+		<div class="panel-head">
+			<h2 id="chartTitle">Requests per minute (last 1h)</h2>
+			<div class="panel-actions">
+				<label for="hoursFilter">Chart range</label>
+				<select id="hoursFilter" aria-label="Chart range">
+					<option value="1">1 hour</option>
+					<option value="3">3 hours</option>
+					<option value="6">6 hours</option>
+					<option value="12">12 hours</option>
+					<option value="24">24 hours</option>
+				</select>
+			</div>
+		</div>
+		<div class="chart-wrap">
+			<canvas id="chart"></canvas>
+		</div>
 		<div id="backoff" class="backoff-warn"></div>
 	</div>
 
 	<div class="panel">
-		<h2>Recent events</h2>
+		<h2 style="font-size: 15px; font-weight: 600; margin-bottom: 14px;">Recent events</h2>
 		<div class="filters">
-			<select id="kindFilter">
+			<select id="kindFilter" aria-label="Filter by kind">
 				<option value="">All kinds</option>
 				<option value="request">request</option>
 				<option value="skipped">skipped</option>
@@ -116,7 +152,7 @@
 				<option value="cache_hit">cache_hit</option>
 				<option value="429">429</option>
 			</select>
-			<select id="bucketFilter">
+			<select id="bucketFilter" aria-label="Filter by bucket">
 				<option value="">All buckets</option>
 				<option value="search">search</option>
 				<option value="library">library</option>

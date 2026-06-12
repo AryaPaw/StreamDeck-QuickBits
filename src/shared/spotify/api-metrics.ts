@@ -129,21 +129,85 @@ class SpotifyApiMetrics {
 		return this.ring.slice(-limit).reverse();
 	}
 
-	getMetricsSnapshot(rolling30s: { total: number; limit: number }) {
+	private eventKey(event: ApiEvent): string {
+		return `${event.ts}:${event.kind}:${event.endpoint}:${event.reason ?? ""}`;
+	}
+
+	async loadEventsForWindow(windowMs: number): Promise<ApiEvent[]> {
 		const now = Date.now();
-		const minuteMs = 60_000;
-		const buckets: Record<string, { request: number; skipped: number; cache_hit: number; blocked: number; r429: number }> =
-			{};
+		const cutoff = now - windowMs;
+		const byKey = new Map<string, ApiEvent>();
 
 		for (const event of this.ring) {
-			if (event.ts < now - 60 * minuteMs) {
-				continue;
+			if (event.ts >= cutoff) {
+				byKey.set(this.eventKey(event), event);
 			}
-			const minuteKey = String(Math.floor(event.ts / minuteMs) * minuteMs);
-			if (!buckets[minuteKey]) {
-				buckets[minuteKey] = { request: 0, skipped: 0, cache_hit: 0, blocked: 0, r429: 0 };
+		}
+
+		for (const event of this.pendingPersist) {
+			if (event.ts >= cutoff) {
+				byKey.set(this.eventKey(event), event);
 			}
-			const row = buckets[minuteKey];
+		}
+
+		const path = metricsPath();
+		if (existsSync(path)) {
+			try {
+				const text = await readFile(path, "utf-8");
+				for (const line of text.split("\n")) {
+					if (!line) {
+						continue;
+					}
+					try {
+						const event = JSON.parse(line) as ApiEvent;
+						if (event.ts >= cutoff) {
+							byKey.set(this.eventKey(event), event);
+						}
+					} catch {
+						// skip corrupt line
+					}
+				}
+			} catch {
+				// ignore read errors
+			}
+		}
+
+		return [...byKey.values()].sort((a, b) => a.ts - b.ts);
+	}
+
+	countRequestsSince(sinceMs: number, events?: ApiEvent[]): number {
+		const source = events ?? this.ring;
+		let count = 0;
+		for (const event of source) {
+			if (event.ts >= sinceMs && event.kind === "request") {
+				count += 1;
+			}
+		}
+		return count;
+	}
+
+	async getMetricsSnapshot(
+		rolling30s: { total: number; limit: number },
+		windowHours = 1,
+		requestsToday?: { count: number; limit: number }
+	) {
+		const hours = Math.min(24, Math.max(1, windowHours));
+		const windowMs = hours * 60 * 60 * 1000;
+		const bucketMs = hours > 6 ? 5 * 60_000 : 60_000;
+		const now = Date.now();
+		const events = await this.loadEventsForWindow(windowMs);
+
+		const buckets: Record<
+			string,
+			{ request: number; skipped: number; cache_hit: number; blocked: number; r429: number }
+		> = {};
+
+		for (const event of events) {
+			const bucketKey = String(Math.floor(event.ts / bucketMs) * bucketMs);
+			if (!buckets[bucketKey]) {
+				buckets[bucketKey] = { request: 0, skipped: 0, cache_hit: 0, blocked: 0, r429: 0 };
+			}
+			const row = buckets[bucketKey];
 			if (event.kind === "request") row.request += 1;
 			else if (event.kind === "skipped") row.skipped += 1;
 			else if (event.kind === "cache_hit") row.cache_hit += 1;
@@ -151,18 +215,26 @@ class SpotifyApiMetrics {
 			else if (event.kind === "429") row.r429 += 1;
 		}
 
-		const perMinute = Object.entries(buckets)
+		const perBucket = Object.entries(buckets)
 			.sort(([a], [b]) => Number(a) - Number(b))
-			.map(([minute, counts]) => ({ minute: Number(minute), ...counts }));
+			.map(([bucket, counts]) => ({ bucket: Number(bucket), ...counts }));
 
 		return {
 			rolling30s,
 			backoff: {
 				blockedMs: spotifyRateLimit.shouldThrottle() ? spotifyRateLimit.msUntilReady() : 0,
+				blockedUntil: spotifyRateLimit.getBlockedUntil(),
 				requestLimit: spotifyRateLimit.getRequestLimit()
 			},
-			perMinute,
-			eventCount: this.ring.length
+			windowHours: hours,
+			bucketMs,
+			perBucket,
+			perMinute: perBucket,
+			requestsToday: {
+				count: requestsToday?.count ?? 0,
+				limit: requestsToday?.limit ?? 200
+			},
+			eventCount: events.length
 		};
 	}
 

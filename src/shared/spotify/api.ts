@@ -9,6 +9,7 @@ import {
 } from "./local/map";
 import { getSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyApiGateway } from "./api-gateway";
+import { spotifyApiMetrics } from "./api-metrics";
 import type { SpotifySettings, SpotifyTrack } from "./types";
 
 const MAX_URI_CACHE_ENTRIES = 200;
@@ -16,7 +17,8 @@ const SEARCH_LIMIT = 10;
 const MAX_SEARCH_QUERIES = 2;
 const PLAYER_RETRY_ATTEMPTS = 3;
 const PLAYER_RETRY_DELAY_MS = 400;
-const PLAYER_RETRY_REASONS = new Set(["track-changed", "like-button-appear", "retry"]);
+const PLAYER_RETRY_REASONS = new Set(["like-button-appear"]);
+const CONTAINS_CACHE_TTL_MS = 30_000;
 
 type SearchTrackItem = {
 	uri: string;
@@ -38,6 +40,7 @@ export class SpotifyAPI {
 	private uriCache = new Map<string, string>();
 	private resolveInFlight = new Map<string, Promise<string | null>>();
 	private uriCacheHydrated = false;
+	private containsCache = new Map<string, { isLiked: boolean; at: number }>();
 
 	hasCachedUri(trackId: string): boolean {
 		return this.uriCache.has(trackId);
@@ -115,6 +118,18 @@ export class SpotifyAPI {
 		return null;
 	}
 
+	private rememberContains(uri: string, isLiked: boolean): void {
+		this.containsCache.set(uri, { isLiked, at: Date.now() });
+	}
+
+	private getCachedContains(uri: string): boolean | null {
+		const entry = this.containsCache.get(uri);
+		if (!entry || Date.now() - entry.at > CONTAINS_CACHE_TTL_MS) {
+			return null;
+		}
+		return entry.isLiked;
+	}
+
 	private async batchContainsUris(
 		settings: SpotifySettings,
 		uris: string[],
@@ -135,7 +150,11 @@ export class SpotifyAPI {
 		}
 		try {
 			const data = (await response.json()) as boolean[];
-			return uris.map((_, index) => data[index] === true);
+			return uris.map((uri, index) => {
+				const isLiked = data[index] === true;
+				this.rememberContains(uri, isLiked);
+				return isLiked;
+			});
 		} catch {
 			return null;
 		}
@@ -294,6 +313,19 @@ export class SpotifyAPI {
 		bypassThrottle = false,
 		track?: SpotifyTrack
 	): Promise<boolean | null> {
+		const cached = this.getCachedContains(uri);
+		if (cached !== null) {
+			spotifyApiMetrics.record({
+				kind: "cache_hit",
+				bucket: "library",
+				method: "GET",
+				endpoint: "/v1/me/library/contains",
+				reason: "contains-cached",
+				track: track ? this.trackContext(track) : undefined
+			});
+			return cached;
+		}
+
 		const response = await this.requestWithAuth(
 			settings,
 			`https://api.spotify.com/v1/me/library/contains?uris=${encodeURIComponent(uri)}`,
@@ -324,7 +356,9 @@ export class SpotifyAPI {
 			return null;
 		}
 		const data = (await response.json()) as boolean[];
-		return data[0] || false;
+		const isLiked = data[0] === true;
+		this.rememberContains(uri, isLiked);
+		return isLiked;
 	}
 
 	private async setSavedUri(
@@ -356,6 +390,7 @@ export class SpotifyAPI {
 			);
 			return false;
 		}
+		this.rememberContains(uri, method === "PUT");
 		return true;
 	}
 
@@ -678,6 +713,11 @@ export class SpotifyAPI {
 
 		if (track.uri.startsWith("spotify:")) {
 			uri = track.uri;
+		} else if (reason === "retry") {
+			uri = this.getCachedUri(track.id) ?? null;
+			if (!uri) {
+				return null;
+			}
 		} else {
 			uri = await this.resolveTrackUri(settings, track, reason);
 		}

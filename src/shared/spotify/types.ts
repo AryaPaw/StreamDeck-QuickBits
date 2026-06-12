@@ -13,6 +13,8 @@ export type SpotifySettings = {
 	likedCache?: Record<string, SpotifyLikedCacheEntry>;
 	trackUriCache?: Record<string, string>;
 	accountDisplayName?: string;
+	/** Persisted Spotify 429 cooldown deadline (epoch ms) */
+	apiBlockedUntil?: number;
 };
 
 export type SpotifyTrack = {

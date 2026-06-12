@@ -31,9 +31,13 @@ function endpointLabel(url: string): string {
 	}
 }
 
+const DAILY_REQUEST_LIMIT = 200;
+
 class SpotifyApiGateway {
 	private requestTimestamps: number[] = [];
 	private inflight = new Map<string, Promise<Response | null>>();
+	private dailyRequestCount = 0;
+	private dailyRequestDayKey = "";
 
 	private trimWindow(): void {
 		const cutoff = Date.now() - SPOTIFY_WEB_API_LIMITS.windowMs;
@@ -62,6 +66,39 @@ class SpotifyApiGateway {
 		};
 	}
 
+	getDailyRequestCount(): { count: number; limit: number } {
+		this.trimDailyCounter();
+		return { count: this.dailyRequestCount, limit: DAILY_REQUEST_LIMIT };
+	}
+
+	private dailyKey(): string {
+		const now = new Date();
+		return `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+	}
+
+	private trimDailyCounter(): void {
+		const key = this.dailyKey();
+		if (key !== this.dailyRequestDayKey) {
+			this.dailyRequestDayKey = key;
+			this.dailyRequestCount = 0;
+		}
+	}
+
+	private recordDailyRequest(): void {
+		this.trimDailyCounter();
+		this.dailyRequestCount += 1;
+		if (this.dailyRequestCount === 100) {
+			streamDeck.logger.warn(
+				`[Spotify] Daily Web API usage at ${this.dailyRequestCount}/${DAILY_REQUEST_LIMIT}`
+			);
+		}
+	}
+
+	private isDailyCapExceeded(): boolean {
+		this.trimDailyCounter();
+		return this.dailyRequestCount >= DAILY_REQUEST_LIMIT;
+	}
+
 	private shouldBypassQuota(options: ApiGatewayOptions): boolean {
 		return (
 			options.bypassQuota === true ||
@@ -70,13 +107,17 @@ class SpotifyApiGateway {
 		);
 	}
 
-	private shouldBlockProactive(options: ApiGatewayOptions): "blocked" | "quota" | null {
+	private shouldBlockProactive(options: ApiGatewayOptions): "blocked" | "quota" | "daily" | null {
 		if (spotifyRateLimit.shouldThrottle()) {
 			return "blocked";
 		}
 
 		if (this.shouldBypassQuota(options)) {
 			return null;
+		}
+
+		if (this.isDailyCapExceeded()) {
+			return "daily";
 		}
 
 		if (this.isQuotaExceeded()) {
@@ -113,7 +154,7 @@ class SpotifyApiGateway {
 		const blockReason = this.shouldBlockProactive(options);
 		if (blockReason) {
 			spotifyApiMetrics.record({
-				kind: blockReason === "quota" ? "skipped" : "blocked",
+				kind: blockReason === "quota" || blockReason === "daily" ? "skipped" : "blocked",
 				bucket,
 				method,
 				endpoint,
@@ -154,6 +195,7 @@ class SpotifyApiGateway {
 		}
 	): Promise<Response | null> {
 		this.recordQuotaUse();
+		this.recordDailyRequest();
 
 		spotifyApiMetrics.record({
 			kind: "request",

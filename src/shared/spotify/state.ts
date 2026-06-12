@@ -19,8 +19,8 @@ const AUTO_ADVANCE_PLAYING_MS = 2_000;
 const PAUSED_CLEAR_MS = 2_000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
-const LIKE_INTERVAL_MS = 45_000;
-const MAX_LIKE_RETRIES = 2;
+const MAX_LIKE_RETRIES = 1;
+const RETRY_SCHEDULE_REASONS = new Set(["track-changed", "like-button-appear", "retry"]);
 const MAX_LIKED_CACHE_ENTRIES = 200;
 const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
 
@@ -49,7 +49,6 @@ class SpotifyState {
 	private likeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private likeRetryCount = 0;
 	private likeRetryTrackId: string | null = null;
-	private likeIntervalTimer: ReturnType<typeof setInterval> | null = null;
 	private likeCacheHydrated = false;
 	private likeSkipUntil = 0;
 	private playingOptimisticUntil = 0;
@@ -93,10 +92,10 @@ class SpotifyState {
 
 	private async bootstrapLikeSync(): Promise<void> {
 		const settings = await loadSpotifySettings();
+		spotifyRateLimit.hydrateFromSettings(settings);
 		this.hydrateLikedCache(settings);
 		spotifyAPI.hydrateUriCache(settings);
 		this.refreshLikeApiStatus();
-		this.startLikeInterval();
 
 		const track = this.currentState.track;
 		if (!track) {
@@ -345,23 +344,6 @@ class SpotifyState {
 			clearTimeout(this.likeRetryTimer);
 			this.likeRetryTimer = null;
 		}
-		if (this.likeIntervalTimer) {
-			clearInterval(this.likeIntervalTimer);
-			this.likeIntervalTimer = null;
-		}
-	}
-
-	private startLikeInterval(): void {
-		if (this.likeIntervalTimer) {
-			return;
-		}
-		this.likeIntervalTimer = setInterval(() => {
-			const track = this.currentState.track;
-			if (!track || this.likeSyncRefs === 0) {
-				return;
-			}
-			void this.enrichIsLiked(track, "interval");
-		}, LIKE_INTERVAL_MS);
 	}
 
 	private resetLikeRetryState(trackId: string): void {
@@ -372,7 +354,7 @@ class SpotifyState {
 	}
 
 	private scheduleLikeRetry(track: SpotifyTrack, reason: string): void {
-		if (this.likeSyncRefs === 0 || this.likeRetryTimer) {
+		if (!RETRY_SCHEDULE_REASONS.has(reason) || this.likeSyncRefs === 0 || this.likeRetryTimer) {
 			return;
 		}
 		this.resetLikeRetryState(track.id);
@@ -384,7 +366,9 @@ class SpotifyState {
 		}
 		this.likeRetryCount += 1;
 
-		const delay = Math.max(2_000, spotifyRateLimit.msUntilReady() + 500);
+		const readyMs = spotifyRateLimit.msUntilReady();
+		const jitterMs = readyMs > 0 ? 30_000 + Math.floor(Math.random() * 90_000) : 0;
+		const delay = Math.max(2_000, readyMs + jitterMs + 500);
 
 		streamDeck.logger.info(
 			`[Spotify] Like check retry ${this.likeRetryCount}/${MAX_LIKE_RETRIES} (${reason}) for "${track.name}" in ${Math.ceil(delay / 1000)}s`
@@ -440,6 +424,35 @@ class SpotifyState {
 	private async enrichIsLiked(track: SpotifyTrack, reason: string): Promise<void> {
 		const trackId = track.id;
 		const trackCtx = { title: track.name, artist: track.artist };
+
+		if (
+			(reason === "track-changed" || reason === "like-button-appear") &&
+			this.getCachedLikeForTrack(track) &&
+			spotifyAPI.getCachedUri(track.id)
+		) {
+			const cached = this.getCachedLikeForTrack(track)!;
+			spotifyApiMetrics.recordPolicySkip(
+				`${reason}:cache-hit`,
+				"/me/library/contains",
+				"library",
+				trackCtx
+			);
+			this.currentState = {
+				...this.currentState,
+				isLiked: cached.isLiked,
+				likeKnown: true,
+				likeApiStatus: "ok"
+			};
+			this.emit(this.currentState);
+			return;
+		}
+
+		if (reason === "retry" && spotifyRateLimit.shouldThrottle()) {
+			spotifyApiMetrics.recordPolicySkip(`${reason}:server-blocked`, "/me/library/contains", "library", trackCtx);
+			this.scheduleLikeRetry(track, reason);
+			return;
+		}
+
 		if (Date.now() < this.likeSkipUntil) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:toggle-cooldown`, "/me/library/contains", "library", trackCtx);
 			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): recent toggle`);
