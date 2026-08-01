@@ -4,6 +4,7 @@ import {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
+import { KeyPressGuard } from "../shared/key-press-guard";
 import {
 	spotifyAPI,
 	getSpotifySettings,
@@ -18,6 +19,7 @@ const LIKE_API_UNAVAILABLE_IMAGE = "imgs/actions/spotify/like-api-unavailable";
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-like" })
 export class SpotifyLikeAction extends SingletonAction {
+	private readonly keyPressGuard = new KeyPressGuard();
 	private currentAction: WillAppearEvent["action"] | null = null;
 	private unsubscribe: (() => void) | null = null;
 	private renderSerial = 0;
@@ -37,33 +39,35 @@ export class SpotifyLikeAction extends SingletonAction {
 	}
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
-		await loadSpotifySettings();
-		const settings = getSpotifySettings();
-		const state = spotifyState.getState();
+		await this.keyPressGuard.run(ev.action.id, async () => {
+			await loadSpotifySettings();
+			const settings = getSpotifySettings();
+			const state = spotifyState.getState();
 
-		if (!settings.refreshToken || state.likeApiStatus === "no_auth") {
-			await ev.action.showAlert();
-			return;
-		}
+			if (!settings.refreshToken || state.likeApiStatus === "no_auth") {
+				await ev.action.showAlert();
+				return;
+			}
 
-		const { track, isLiked } = state;
-		if (!track) {
-			await ev.action.showAlert();
-			return;
-		}
+			const { track, isLiked } = state;
+			if (!track) {
+				await ev.action.showAlert();
+				return;
+			}
 
-		const newLiked = !isLiked;
-		spotifyState.setLikedOptimistic(newLiked);
+			const newLiked = !isLiked;
+			spotifyState.setLikedOptimistic(newLiked);
 
-		const success = await spotifyAPI.setLike(settings, track, newLiked);
-		if (!success) {
-			spotifyState.setLikedOptimistic(isLiked);
-			spotifyState.refreshLikeApiStatus();
-			await ev.action.showAlert();
-			return;
-		}
+			const success = await spotifyAPI.setLike(settings, track, newLiked);
+			if (!success) {
+				spotifyState.setLikedOptimistic(isLiked);
+				spotifyState.refreshLikeApiStatus();
+				await ev.action.showAlert();
+				return;
+			}
 
-		await this.renderLikeKey(spotifyState.getState());
+			await this.renderLikeKey(spotifyState.getState());
+		});
 	}
 
 	private async onStateChange(state: SpotifyPlaybackState): Promise<void> {

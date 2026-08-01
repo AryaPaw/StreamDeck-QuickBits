@@ -4,6 +4,7 @@ import {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
+import { KeyPressGuard } from "../shared/key-press-guard";
 import { buildNowPlayingKeyImage } from "../shared/spotify/artwork-overlay";
 import {
 	spotifyLocalClient,
@@ -18,6 +19,7 @@ const ARTWORK_WAIT_MS = 1_500;
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-now-playing" })
 export class SpotifyNowPlayingAction extends SingletonAction {
+	private readonly keyPressGuard = new KeyPressGuard();
 	private currentAction: WillAppearEvent["action"] | null = null;
 	private unsubscribe: (() => void) | null = null;
 	private lastTrackKey: string | null = null;
@@ -36,23 +38,25 @@ export class SpotifyNowPlayingAction extends SingletonAction {
 	}
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
-		const { track } = spotifyState.getState();
-		if (!track) {
-			await ev.action.showAlert();
-			return;
-		}
+		await this.keyPressGuard.run(ev.action.id, async () => {
+			const { track } = spotifyState.getState();
+			if (!track) {
+				await ev.action.showAlert();
+				return;
+			}
 
-		const previousPlaying = track.isPlaying;
-		const nextPlaying = !previousPlaying;
-		spotifyState.setPlayingOptimistic(nextPlaying);
-		await this.render(track, nextPlaying);
+			const previousPlaying = track.isPlaying;
+			const nextPlaying = !previousPlaying;
+			spotifyState.setPlayingOptimistic(nextPlaying);
+			await this.render(track, nextPlaying);
 
-		const success = await spotifyLocalClient.togglePlayPause();
-		if (!success) {
-			spotifyState.setPlayingOptimistic(previousPlaying);
-			await this.render(track, previousPlaying);
-			await ev.action.showAlert();
-		}
+			const success = await spotifyLocalClient.togglePlayPause();
+			if (!success) {
+				spotifyState.setPlayingOptimistic(previousPlaying);
+				await this.render(track, previousPlaying);
+				await ev.action.showAlert();
+			}
+		});
 	}
 
 	private trackKey(track: SpotifyTrack): string {

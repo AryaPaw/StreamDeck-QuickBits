@@ -7,6 +7,7 @@ import streamDeck, {
 	WillAppearEvent,
 	WillDisappearEvent
 } from "@elgato/streamdeck";
+import { KeyPressGuard } from "../shared/key-press-guard";
 import { normalizeSkydimoLightingMode, SkydimoLightingToggleSettings } from "../shared/settings";
 import {
 	getSkydimoLightingOffTriggerPath,
@@ -31,9 +32,7 @@ const SKYDIMO_KEY_IMAGE_OFF = "imgs/actions/marker-skydimo-screen-sync/off";
  */
 @action({ UUID: "dev.aryapaw.quickbits.marker-skydimo-screen-sync" })
 export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLightingToggleSettings> {
-	private readonly inFlightContextIds = new Set<string>();
-	private readonly lastToggleByContext = new Map<string, number>();
-	private readonly minToggleIntervalMs = 250;
+	private readonly keyPressGuard = new KeyPressGuard();
 	/** Hold at least this long to fire the Lighting Off trigger exe. */
 	private readonly longPressMs = 650;
 	private readonly keySessions = new Map<
@@ -55,7 +54,7 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 
 	override async onKeyDown(ev: KeyDownEvent<SkydimoLightingToggleSettings>): Promise<void> {
 		const contextId = ev.action.id;
-		if (this.inFlightContextIds.has(contextId)) {
+		if (this.keyPressGuard.isInFlight(contextId)) {
 			return;
 		}
 
@@ -98,12 +97,6 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 		this.keySessions.delete(contextId);
 	}
 
-	private canTrigger(contextId: string): boolean {
-		const now = Date.now();
-		const lastToggleAt = this.lastToggleByContext.get(contextId) ?? 0;
-		return !this.inFlightContextIds.has(contextId) && now - lastToggleAt >= this.minToggleIntervalMs;
-	}
-
 	private async onLongPress(contextId: string): Promise<void> {
 		const session = this.keySessions.get(contextId);
 		if (!session) {
@@ -114,7 +107,7 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 			session.timer = null;
 		}
 
-		if (!this.canTrigger(contextId)) {
+		if (!this.keyPressGuard.canTrigger(contextId)) {
 			return;
 		}
 		session.longPressHandled = true;
@@ -126,15 +119,7 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 		action: KeyDownEvent<SkydimoLightingToggleSettings>["action"],
 		contextId: string
 	): Promise<void> {
-		if (!this.canTrigger(contextId)) {
-			return;
-		}
-
-		const now = Date.now();
-		this.inFlightContextIds.add(contextId);
-		this.lastToggleByContext.set(contextId, now);
-
-		try {
+		await this.keyPressGuard.run(contextId, async () => {
 			const exePath = getSkydimoLightingOffTriggerPath();
 			if (!existsSync(exePath)) {
 				streamDeck.logger.error(`[SkydimoLightingToggle] Missing trigger exe: ${exePath}`);
@@ -151,25 +136,14 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 			const newSettings: SkydimoLightingToggleSettings = { lightingMode: "off", screenSyncActive: false };
 			await action.setSettings(newSettings);
 			await this.applyUi(action, newSettings);
-		} finally {
-			this.inFlightContextIds.delete(contextId);
-			this.lastToggleByContext.set(contextId, Date.now());
-		}
+		});
 	}
 
 	private async runToggleSyncStatic(
 		action: KeyDownEvent<SkydimoLightingToggleSettings>["action"],
 		contextId: string
 	): Promise<void> {
-		if (!this.canTrigger(contextId)) {
-			return;
-		}
-
-		const now = Date.now();
-		this.inFlightContextIds.add(contextId);
-		this.lastToggleByContext.set(contextId, now);
-
-		try {
+		await this.keyPressGuard.run(contextId, async () => {
 			const currentSettings = await action.getSettings();
 			const mode = normalizeSkydimoLightingMode(currentSettings);
 			const nextMode = mode === "off" ? "static" : mode === "sync" ? "static" : "sync";
@@ -195,10 +169,7 @@ export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLighting
 			};
 			await action.setSettings(newSettings);
 			await this.applyUi(action, newSettings);
-		} finally {
-			this.inFlightContextIds.delete(contextId);
-			this.lastToggleByContext.set(contextId, Date.now());
-		}
+		});
 	}
 
 	private async applyUi(

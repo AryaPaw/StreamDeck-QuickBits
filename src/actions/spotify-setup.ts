@@ -6,6 +6,7 @@ import streamDeck, {
 	SingletonAction,
 	WillAppearEvent
 } from "@elgato/streamdeck";
+import { KeyPressGuard } from "../shared/key-press-guard";
 import { spotifyAuth, loadSpotifySettings, saveSpotifySettings, spotifyWebServer, spotifyAPI } from "../shared/spotify";
 
 type SpotifySetupActionSettings = {
@@ -19,6 +20,7 @@ type SpotifySetupPiMessage = {
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-setup" })
 export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettings> {
+	private readonly keyPressGuard = new KeyPressGuard();
 	private currentAction: WillAppearEvent["action"] | null = null;
 
 	override async onWillAppear(ev: WillAppearEvent<SpotifySetupActionSettings>): Promise<void> {
@@ -92,7 +94,9 @@ export class SpotifySetupAction extends SingletonAction<SpotifySetupActionSettin
 
 	override async onKeyDown(ev: KeyDownEvent): Promise<void> {
 		this.currentAction = ev.action;
-		await this.startSetup(ev);
+		await this.keyPressGuard.run(ev.action.id, async () => {
+			await this.startSetup(ev);
+		});
 	}
 
 	private async startSetup(ev: KeyDownEvent): Promise<void> {

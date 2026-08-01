@@ -36,6 +36,24 @@ class SpotifyApiGateway {
 	private inflight = new Map<string, Promise<Response | null>>();
 	private dailyRequestCount = 0;
 	private dailyRequestDayKey = "";
+	private dailySoftStopLogged = false;
+	private lastError: string | null = null;
+
+	getLastError(): string | null {
+		return this.lastError;
+	}
+
+	private setLastError(message: string): void {
+		this.lastError = message.includes("fetch failed") ? "fetch failed" : message;
+	}
+
+	private clearLastError(): void {
+		this.lastError = null;
+	}
+
+	resetLastError(): void {
+		this.clearLastError();
+	}
 
 	private trimWindow(): void {
 		const cutoff = Date.now() - SPOTIFY_WEB_API_LIMITS.windowMs;
@@ -68,8 +86,13 @@ class SpotifyApiGateway {
 		this.trimDailyCounter();
 		return {
 			count: this.dailyRequestCount,
-			limit: SPOTIFY_WEB_API_LIMITS.dailyRequestLimit
+			limit: SPOTIFY_WEB_API_LIMITS.dailyBackgroundLimit
 		};
+	}
+
+	/** True when soft daily budget is exhausted - background like-sync should pause */
+	isDailyBackgroundBudgetExhausted(): boolean {
+		return this.isDailySoftStopActive();
 	}
 
 	private dailyKey(): string {
@@ -82,22 +105,34 @@ class SpotifyApiGateway {
 		if (key !== this.dailyRequestDayKey) {
 			this.dailyRequestDayKey = key;
 			this.dailyRequestCount = 0;
+			this.dailySoftStopLogged = false;
 		}
 	}
 
-	private recordDailyRequest(): void {
+	private recordDailyRequest(options: ApiGatewayOptions): void {
 		this.trimDailyCounter();
+		// Manual / bypass requests do not consume the soft background budget
+		if (this.shouldBypassQuota(options)) {
+			return;
+		}
 		this.dailyRequestCount += 1;
-		if (this.dailyRequestCount === SPOTIFY_WEB_API_LIMITS.dailyRequestWarnAt) {
+		const limit = SPOTIFY_WEB_API_LIMITS.dailyBackgroundLimit;
+		if (this.dailyRequestCount === SPOTIFY_WEB_API_LIMITS.dailyBackgroundWarnAt) {
 			streamDeck.logger.warn(
-				`[Spotify] Daily Web API usage at ${this.dailyRequestCount}/${SPOTIFY_WEB_API_LIMITS.dailyRequestLimit}`
+				`[Spotify] Daily background Web API usage at ${this.dailyRequestCount}/${limit} (manual Like still allowed)`
+			);
+		}
+		if (this.dailyRequestCount === limit && !this.dailySoftStopLogged) {
+			this.dailySoftStopLogged = true;
+			streamDeck.logger.warn(
+				`[Spotify] Daily background API budget exhausted (${limit}) - like sync paused until midnight; manual Like still works`
 			);
 		}
 	}
 
-	private isDailyCapExceeded(): boolean {
+	private isDailySoftStopActive(): boolean {
 		this.trimDailyCounter();
-		return this.dailyRequestCount >= SPOTIFY_WEB_API_LIMITS.dailyRequestLimit;
+		return this.dailyRequestCount >= SPOTIFY_WEB_API_LIMITS.dailyBackgroundLimit;
 	}
 
 	private shouldBypassQuota(options: ApiGatewayOptions): boolean {
@@ -109,6 +144,7 @@ class SpotifyApiGateway {
 	}
 
 	private shouldBlockProactive(options: ApiGatewayOptions): "blocked" | "quota" | "daily" | null {
+		// Hard stop: respect Spotify Retry-After even for manual (avoid hammering while banned)
 		if (spotifyRateLimit.shouldThrottle()) {
 			return "blocked";
 		}
@@ -117,7 +153,8 @@ class SpotifyApiGateway {
 			return null;
 		}
 
-		if (this.isDailyCapExceeded()) {
+		// Soft daily: only background / normal sync is paused
+		if (this.isDailySoftStopActive()) {
 			return "daily";
 		}
 
@@ -152,8 +189,11 @@ class SpotifyApiGateway {
 			return existing;
 		}
 
+		this.clearLastError();
+
 		const blockReason = this.shouldBlockProactive(options);
 		if (blockReason) {
+			this.setLastError(blockReason === "blocked" ? "server blocked" : blockReason);
 			spotifyApiMetrics.record({
 				kind: blockReason === "quota" || blockReason === "daily" ? "skipped" : "blocked",
 				bucket,
@@ -196,7 +236,7 @@ class SpotifyApiGateway {
 		}
 	): Promise<Response | null> {
 		this.recordQuotaUse();
-		this.recordDailyRequest();
+		this.recordDailyRequest(ctx);
 
 		spotifyApiMetrics.record({
 			kind: "request",
@@ -211,6 +251,7 @@ class SpotifyApiGateway {
 
 		let token = await spotifyAuth.ensureAccessToken(settings);
 		if (!token) {
+			this.setLastError("no access token");
 			return null;
 		}
 
@@ -224,6 +265,7 @@ class SpotifyApiGateway {
 			if (response.status === 401) {
 				token = await spotifyAuth.ensureAccessToken(settings, true);
 				if (!token) {
+					this.setLastError("no access token");
 					return null;
 				}
 				response = await doFetch(token);
@@ -249,6 +291,8 @@ class SpotifyApiGateway {
 
 			return response;
 		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			this.setLastError(msg);
 			streamDeck.logger.error(`[Spotify] request failed: ${url} ${e}`);
 			return null;
 		}

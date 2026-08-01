@@ -1,6 +1,7 @@
 import streamDeck from "@elgato/streamdeck";
 import { getSpotifySettings, loadSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyAPI } from "./api";
+import { spotifyApiGateway } from "./api-gateway";
 import { spotifyApiMetrics } from "./api-metrics";
 import { spotifyRateLimit } from "./rate-limit";
 import { spotifyLocalClient } from "./local/client";
@@ -19,6 +20,7 @@ const AUTO_ADVANCE_PLAYING_MS = 2_000;
 const PAUSED_CLEAR_MS = 2_000;
 const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
+const LIKE_CACHE_HIT_GRACE_MS = 15_000;
 const MAX_LIKE_RETRIES = 1;
 const RETRY_SCHEDULE_REASONS = new Set(["track-changed", "like-button-appear", "retry"]);
 const MAX_LIKED_CACHE_ENTRIES = 200;
@@ -38,6 +40,9 @@ class SpotifyState {
 	};
 	private lastTrackId: string | null = null;
 	private lastTrackAt = 0;
+	private lastTrackChangedAt = 0;
+	/** True only when switching from one track to another - not cold start null->track */
+	private lastTrackChangeWasSwitch = false;
 	private lastWasPlaying = false;
 	private lastPlayingTrueAt = 0;
 	private pausedSince = 0;
@@ -162,16 +167,15 @@ class SpotifyState {
 	}
 
 	private getCachedLikeForTrack(track: SpotifyTrack): LikedCacheEntry | null {
-		const byId = this.getCachedLike(track.id);
-		if (byId) {
-			return byId;
-		}
-
 		const uri = spotifyAPI.getCachedUri(track.id);
 		if (uri) {
-			return this.likedByUriCache.get(uri) ?? null;
+			const byUri = this.likedByUriCache.get(uri);
+			if (byUri) {
+				return byUri;
+			}
 		}
-
+		// Do not trust trackId-only liked cache without a matching URI entry -
+		// it can stay green after liking a wrong duplicate URI
 		return null;
 	}
 
@@ -275,7 +279,11 @@ class SpotifyState {
 
 			if (track.id !== this.lastTrackId) {
 				const wasPlaying = this.wasRecentlyPlaying();
+				const previousTrackId = this.lastTrackId;
 				this.lastTrackId = track.id;
+				this.lastTrackChangedAt = Date.now();
+				// Cold start (null -> track) is not a skip - do not force cache-grace API burn
+				this.lastTrackChangeWasSwitch = previousTrackId !== null;
 				trackChanged = true;
 				this.pausedSince = 0;
 				this.likeRetryCount = 0;
@@ -425,17 +433,44 @@ class SpotifyState {
 		const trackId = track.id;
 		const trackCtx = { title: track.name, artist: track.artist };
 
+		const uri = spotifyAPI.getCachedUri(track.id);
+		const hasLikeCache =
+			Boolean(uri) &&
+			Boolean(this.likedByUriCache.get(uri!)) &&
+			spotifyAPI.isPlayerConfirmed(track.id);
+		// Grace only after a real track->track skip while playing - not cold start / paused bootstrap
+		const withinCacheGrace =
+			this.lastTrackChangeWasSwitch &&
+			track.isPlaying &&
+			Date.now() - this.lastTrackChangedAt < LIKE_CACHE_HIT_GRACE_MS;
+
 		if (
 			(reason === "track-changed" || reason === "like-button-appear") &&
-			this.getCachedLikeForTrack(track) &&
-			spotifyAPI.getCachedUri(track.id)
+			hasLikeCache &&
+			withinCacheGrace
 		) {
-			const cached = this.getCachedLikeForTrack(track)!;
+			spotifyApiMetrics.recordPolicySkip(
+				`${reason}:cache-grace`,
+				"/me/library/contains",
+				"library",
+				trackCtx
+			);
+			streamDeck.logger.debug(
+				`[Spotify] Like check (${reason}): skipping cache-hit for "${track.name}" - track changed ${Math.ceil((Date.now() - this.lastTrackChangedAt) / 1000)}s ago`
+			);
+		} else if (
+			(reason === "track-changed" || reason === "like-button-appear") &&
+			hasLikeCache
+		) {
+			const cached = this.likedByUriCache.get(uri!)!;
 			spotifyApiMetrics.recordPolicySkip(
 				`${reason}:cache-hit`,
 				"/me/library/contains",
 				"library",
 				trackCtx
+			);
+			streamDeck.logger.debug(
+				`[Spotify] Like check (${reason}): cache-hit for "${track.name}" (${cached.isLiked ? "liked" : "not liked"}) uri=${uri} - 0 API`
 			);
 			this.currentState = {
 				...this.currentState,
@@ -450,6 +485,23 @@ class SpotifyState {
 		if (reason === "retry" && spotifyRateLimit.shouldThrottle()) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:server-blocked`, "/me/library/contains", "library", trackCtx);
 			this.scheduleLikeRetry(track, reason);
+			return;
+		}
+
+		if (spotifyApiGateway.isDailyBackgroundBudgetExhausted()) {
+			spotifyApiMetrics.recordPolicySkip(`${reason}:daily-budget`, "/me/library/contains", "library", trackCtx);
+			const cachedDaily = this.getCachedLikeForTrack(track);
+			if (cachedDaily) {
+				this.currentState = {
+					...this.currentState,
+					isLiked: cachedDaily.isLiked,
+					likeKnown: true,
+					likeApiStatus: "ok"
+				};
+				this.emit(this.currentState);
+			} else {
+				this.updateLikeApiStatus("unavailable");
+			}
 			return;
 		}
 
@@ -570,7 +622,9 @@ class SpotifyState {
 			const result = await spotifyAPI.isTrackLiked(settings, track, reason);
 			const newUri = spotifyAPI.getCachedUri(track.id);
 			if (newUri && oldUri && newUri !== oldUri) {
-				this.clearLikedCacheForTrack(track.id);
+				this.likedResultCache.delete(track.id);
+				this.likedByUriCache.delete(oldUri);
+				this.persistLikedCache();
 				streamDeck.logger.info(
 					`[Spotify] URI changed for "${track.name}": ${oldUri} -> ${newUri}, cleared liked cache`
 				);

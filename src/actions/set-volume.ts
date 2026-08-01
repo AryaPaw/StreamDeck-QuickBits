@@ -1,9 +1,11 @@
 import { action, DidReceiveSettingsEvent, KeyDownEvent, SingletonAction, WillAppearEvent } from "@elgato/streamdeck";
 import { setVolume } from "../shared/helper";
+import { KeyPressGuard } from "../shared/key-press-guard";
 import { normalizePercent, SetVolumeSettings } from "../shared/settings";
 
 @action({ UUID: "dev.aryapaw.quickbits.set-volume" })
 export class SetVolumeAction extends SingletonAction<SetVolumeSettings> {
+	private readonly keyPressGuard = new KeyPressGuard();
 	override async onWillAppear(ev: WillAppearEvent<SetVolumeSettings>): Promise<void> {
 		const percent = normalizePercent(ev.payload.settings.percent);
 
@@ -20,13 +22,15 @@ export class SetVolumeAction extends SingletonAction<SetVolumeSettings> {
 	}
 
 	override async onKeyDown(ev: KeyDownEvent<SetVolumeSettings>): Promise<void> {
-		const percent = normalizePercent(ev.payload.settings.percent);
-		const success = await setVolume(percent);
+		await this.keyPressGuard.run(ev.action.id, async () => {
+			const percent = normalizePercent(ev.payload.settings.percent);
+			const success = await setVolume(percent);
 
-		if (success) {
-			await ev.action.showOk();
-		} else {
-			await ev.action.showAlert();
-		}
+			if (success) {
+				await ev.action.showOk();
+			} else {
+				await ev.action.showAlert();
+			}
+		});
 	}
 }

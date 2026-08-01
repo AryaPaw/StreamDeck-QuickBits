@@ -4,21 +4,39 @@ namespace Quickbits.Triggers;
 
 public static class ForegroundTriggerApp
 {
-	public static void Run(string windowTitle, int foregroundHoldMs = 280, int closeAfterMs = 450)
+	/// <summary>
+	/// Entry point. Focus stealing is OFF by default (for Skydimo "app is running" rules).
+	/// Pass "--foreground" (or "-fg") as a CLI arg to force the old foreground behavior
+	/// (for Skydimo "app is foreground" / "title contains" rules).
+	/// </summary>
+	public static void Run(string windowTitle)
+	{
+		var args = Environment.GetCommandLineArgs();
+		var stealFocus = args.Any(a =>
+			a.Equals("--foreground", StringComparison.OrdinalIgnoreCase) ||
+			a.Equals("-fg", StringComparison.OrdinalIgnoreCase));
+		Run(windowTitle, stealFocus);
+	}
+
+	public static void Run(string windowTitle, bool stealFocus, int foregroundHoldMs = 900, int aliveMs = 1000)
 	{
 		ApplicationConfiguration.Initialize();
-		Application.Run(new TriggerForm(windowTitle, foregroundHoldMs, closeAfterMs));
+		Application.Run(new TriggerForm(windowTitle, stealFocus, foregroundHoldMs, aliveMs));
 	}
 }
 
 internal sealed class TriggerForm : Form
 {
+	private readonly bool _stealFocus;
 	private readonly int _foregroundHoldMs;
 	private readonly System.Windows.Forms.Timer _closeTimer = new();
+	private readonly System.Windows.Forms.Timer _reassertTimer = new();
+	private int _reassertElapsedMs;
 
-	public TriggerForm(string windowTitle, int foregroundHoldMs, int closeAfterMs)
+	public TriggerForm(string windowTitle, bool stealFocus, int foregroundHoldMs, int aliveMs)
 	{
-		_foregroundHoldMs = foregroundHoldMs;
+		_stealFocus = stealFocus;
+		_foregroundHoldMs = Math.Clamp(foregroundHoldMs, 0, 5000);
 
 		Text = windowTitle;
 		FormBorderStyle = FormBorderStyle.None;
@@ -27,10 +45,23 @@ internal sealed class TriggerForm : Form
 		Location = new Point(-20000, -20000);
 		Size = new Size(1, 1);
 		Opacity = 0.01;
-		TopMost = true;
+		TopMost = _stealFocus;
 		BackColor = Color.Black;
 
-		_closeTimer.Interval = Math.Max(50, closeAfterMs);
+		// Re-assert foreground periodically so Skydimo has time to catch the window (foreground rules only)
+		_reassertTimer.Interval = 150;
+		_reassertTimer.Tick += (_, _) =>
+		{
+			_reassertElapsedMs += _reassertTimer.Interval;
+			NativeMethods.TrySetForegroundWindow(Handle);
+			if (_reassertElapsedMs >= _foregroundHoldMs)
+			{
+				_reassertTimer.Stop();
+			}
+		};
+
+		// Keep the process alive long enough for "app is running" / process-exists detection
+		_closeTimer.Interval = Math.Max(50, aliveMs);
 		_closeTimer.Tick += (_, _) =>
 		{
 			_closeTimer.Stop();
@@ -38,13 +69,21 @@ internal sealed class TriggerForm : Form
 		};
 	}
 
+	// When not stealing focus, show the window without activating it (does not switch the active window)
+	protected override bool ShowWithoutActivation => !_stealFocus;
+
 	protected override CreateParams CreateParams
 	{
 		get
 		{
 			const int WS_EX_TOOLWINDOW = 0x00000080;
+			const int WS_EX_NOACTIVATE = 0x08000000;
 			var cp = base.CreateParams;
 			cp.ExStyle |= WS_EX_TOOLWINDOW;
+			if (!_stealFocus)
+			{
+				cp.ExStyle |= WS_EX_NOACTIVATE;
+			}
 			return cp;
 		}
 	}
@@ -52,24 +91,26 @@ internal sealed class TriggerForm : Form
 	protected override void OnShown(EventArgs e)
 	{
 		base.OnShown(e);
-		NativeMethods.TrySetForegroundWindow(Handle);
+		if (_stealFocus)
+		{
+			NativeMethods.TrySetForegroundWindow(Handle);
+			_reassertTimer.Start();
+		}
 		_closeTimer.Start();
 	}
 
 	protected override void OnLoad(EventArgs e)
 	{
 		base.OnLoad(e);
-		NativeMethods.TrySetForegroundWindow(Handle);
-		BeginInvoke(() =>
+		if (_stealFocus)
 		{
 			NativeMethods.TrySetForegroundWindow(Handle);
-			Thread.Sleep(Math.Clamp(_foregroundHoldMs, 0, 2000));
-			NativeMethods.TrySetForegroundWindow(Handle);
-		});
+		}
 	}
 
 	protected override void OnFormClosed(FormClosedEventArgs e)
 	{
+		_reassertTimer.Dispose();
 		_closeTimer.Dispose();
 		base.OnFormClosed(e);
 	}
