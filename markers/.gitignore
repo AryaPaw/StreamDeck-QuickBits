@@ -1,3 +1,0 @@
-# Legacy / empty marker tree — ignore build cruft if present
-bin/
-obj/

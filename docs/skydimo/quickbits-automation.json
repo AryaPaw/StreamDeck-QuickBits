@@ -1,0 +1,94 @@
+{
+  "enabled": true,
+  "baseline": {
+    "actions": []
+  },
+  "rules": [
+    {
+      "id": "quickbits-skydimo-static",
+      "name": "QuickBits Skydimo Static",
+      "enabled": true,
+      "conditions": {
+        "logic": "and",
+        "negated": false,
+        "items": [
+          {
+            "kind": "app_running",
+            "app_name": "skydimotrigger.screenstatic.exe"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "scope": { "port": "COM6" },
+          "effectId": "SingleColor",
+          "brightness": 80,
+          "powerOff": false,
+          "params": { "color": "#fff3c7" }
+        }
+      ]
+    },
+    {
+      "id": "quickbits-skydimo-screensync",
+      "name": "QuickBits Skydimo ScreenSync",
+      "enabled": true,
+      "conditions": {
+        "logic": "and",
+        "negated": false,
+        "items": [
+          {
+            "kind": "app_running",
+            "app_name": "skydimotrigger.screensync.exe"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "scope": { "port": "COM6" },
+          "effectId": "ScreenMirror",
+          "powerOff": false,
+          "params": {
+            "autoCrop": false,
+            "bbBlurRemoveCnt": 1,
+            "bbBorderFrameCnt": 50,
+            "bbMaxInconsistentCnt": 10,
+            "bbMode": 0,
+            "bbThreshold": 5,
+            "bbUnknownFrameCnt": 600,
+            "blueCalibration": 1,
+            "blur": 0,
+            "brightness": 1,
+            "colorTemperature": 6500,
+            "gamma": 1,
+            "greenCalibration": 1,
+            "redCalibration": 1,
+            "saturation": 1,
+            "smoothness": 80
+          }
+        }
+      ]
+    },
+    {
+      "id": "quickbits-skydimo-lightingoff",
+      "name": "QuickBits Skydimo LightingOff",
+      "enabled": true,
+      "conditions": {
+        "logic": "and",
+        "negated": false,
+        "items": [
+          {
+            "kind": "app_running",
+            "app_name": "skydimotrigger.lightingoff.exe"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "scope": { "port": "COM6" },
+          "powerOff": true,
+          "params": {}
+        }
+      ]
+    }
+  ]
+}
