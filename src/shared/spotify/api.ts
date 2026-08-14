@@ -9,8 +9,9 @@ import {
 } from "./local/map";
 import { getSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyApiGateway } from "./api-gateway";
+import type { ApiRequestPriority } from "./api-gateway";
 import { spotifyApiMetrics } from "./api-metrics";
-import type { SpotifySettings, SpotifyTrack } from "./types";
+import type { SpotifyPlaylistOption, SpotifySettings, SpotifyTrack } from "./types";
 
 const MAX_URI_CACHE_ENTRIES = 200;
 const SEARCH_LIMIT = 10;
@@ -18,6 +19,8 @@ const MAX_SEARCH_QUERIES = 2;
 const PLAYER_RETRY_ATTEMPTS = 3;
 const PLAYER_RETRY_DELAY_MS = 400;
 const PLAYER_RETRY_REASONS = new Set(["like-button-appear", "toggle-like"]);
+const PLAYLIST_FETCH_FAIL_COOLDOWN_MS = 60_000;
+const PLAYLIST_SNAPSHOT_TTL_MS = 30_000;
 const CONTAINS_CACHE_TTL_MS = 30_000;
 const DURATION_MATCH_MS = 2_000;
 const DURATION_MISMATCH_MS = 5_000;
@@ -320,16 +323,22 @@ export class SpotifyAPI {
 	private async requestWithAuth(
 		settings: SpotifySettings,
 		url: string,
-		init?: { method?: "PUT" | "POST" | "DELETE"; headers?: Record<string, string> },
-		options?: { bypassQuota?: boolean; reason?: string; track?: SpotifyTrack }
+		init?: { method?: "GET" | "PUT" | "POST" | "DELETE"; headers?: Record<string, string>; body?: string },
+		options?: {
+			bypassQuota?: boolean;
+			reason?: string;
+			track?: SpotifyTrack;
+			priority?: ApiRequestPriority;
+		}
 	): Promise<Response | null> {
 		return spotifyApiGateway.request(settings, url, {
 			method: init?.method ?? "GET",
 			headers: init?.headers,
+			body: init?.body,
 			reason: options?.reason ?? "api",
 			bypassQuota: options?.bypassQuota,
 			bypassLibraryThrottle: options?.bypassQuota,
-			priority: options?.bypassQuota ? "manual" : "normal",
+			priority: options?.priority ?? (options?.bypassQuota ? "manual" : "normal"),
 			track: options?.track ? this.trackContext(options.track) : undefined
 		});
 	}
@@ -352,6 +361,528 @@ export class SpotifyAPI {
 		} catch {
 			return null;
 		}
+	}
+
+	async listWritablePlaylists(settings: SpotifySettings): Promise<SpotifyPlaylistOption[] | null> {
+		const profile = await this.fetchUserProfile(settings);
+		if (!profile) {
+			return null;
+		}
+
+		const playlists: SpotifyPlaylistOption[] = [];
+		const limit = 50;
+		let offset = 0;
+
+		for (let page = 0; page < 8; page += 1) {
+			const response = await this.requestWithAuth(
+				settings,
+				`https://api.spotify.com/v1/me/playlists?limit=${limit}&offset=${offset}`,
+				undefined,
+				{ reason: "playlists", bypassQuota: true }
+			);
+			if (!response || !response.ok) {
+				const body = response ? await response.text().catch(() => "") : "";
+				streamDeck.logger.warn(
+					`[Spotify] listWritablePlaylists failed: ${response?.status ?? spotifyApiGateway.getLastError() ?? "no response"}${body ? ` ${body.slice(0, 200)}` : ""}`
+				);
+				return playlists.length > 0 ? playlists : null;
+			}
+
+			try {
+				const data = (await response.json()) as {
+					items?: Array<{
+						id?: string;
+						name?: string;
+						collaborative?: boolean;
+						owner?: { id?: string };
+					}>;
+					next?: string | null;
+				};
+				for (const item of data.items ?? []) {
+					if (!item.id || !item.name) {
+						continue;
+					}
+					const ownerId = item.owner?.id ?? "";
+					const collaborative = item.collaborative === true;
+					if (ownerId !== profile.id && !collaborative) {
+						continue;
+					}
+					playlists.push({
+						id: item.id,
+						name: item.name,
+						ownerId,
+						collaborative
+					});
+				}
+				if (!data.next) {
+					break;
+				}
+				offset += limit;
+			} catch (e) {
+				streamDeck.logger.error("[Spotify] listWritablePlaylists parse error: " + e);
+				return playlists.length > 0 ? playlists : null;
+			}
+		}
+
+		playlists.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+		return playlists;
+	}
+
+	private playlistUriCache = new Map<
+		string,
+		{ uris: Set<string>; snapshotId: string | null; snapshotCheckedAt: number }
+	>();
+	private playlistUriInFlight = new Map<string, Promise<Set<string> | null>>();
+	private playlistSnapshotInFlight = new Map<string, Promise<string | null>>();
+	private playlistFetchFailedAt = new Map<string, number>();
+
+	forgetPlaylistCache(playlistId?: string): void {
+		if (playlistId) {
+			this.playlistUriCache.delete(playlistId);
+			this.playlistFetchFailedAt.delete(playlistId);
+			this.playlistSnapshotInFlight.delete(playlistId);
+			return;
+		}
+		this.playlistUriCache.clear();
+		this.playlistFetchFailedAt.clear();
+		this.playlistSnapshotInFlight.clear();
+	}
+
+	private rememberPlaylistCache(
+		playlistId: string,
+		uris: Set<string>,
+		snapshotId: string | null
+	): void {
+		this.playlistUriCache.set(playlistId, {
+			uris,
+			snapshotId,
+			snapshotCheckedAt: Date.now()
+		});
+	}
+
+	private async fetchPlaylistSnapshot(
+		settings: SpotifySettings,
+		playlistId: string
+	): Promise<string | null> {
+		const inflight = this.playlistSnapshotInFlight.get(playlistId);
+		if (inflight) {
+			return inflight;
+		}
+		const promise = this.requestPlaylistSnapshot(settings, playlistId);
+		this.playlistSnapshotInFlight.set(playlistId, promise);
+		try {
+			return await promise;
+		} finally {
+			if (this.playlistSnapshotInFlight.get(playlistId) === promise) {
+				this.playlistSnapshotInFlight.delete(playlistId);
+			}
+		}
+	}
+
+	private async requestPlaylistSnapshot(
+		settings: SpotifySettings,
+		playlistId: string
+	): Promise<string | null> {
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}?fields=snapshot_id`,
+			undefined,
+			{ reason: "playlist-snapshot", priority: "background" }
+		);
+		if (!response || !response.ok) {
+			return null;
+		}
+		try {
+			const data = (await response.json()) as { snapshot_id?: string };
+			return data.snapshot_id?.trim() || null;
+		} catch {
+			return null;
+		}
+	}
+
+	async fetchPlaylistName(settings: SpotifySettings, playlistId: string): Promise<string | null> {
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}?fields=name`,
+			undefined,
+			{ reason: "playlist-name", bypassQuota: true }
+		);
+		if (!response || !response.ok) {
+			return null;
+		}
+		try {
+			const data = (await response.json()) as { name?: string };
+			const name = data.name?.trim();
+			return name || null;
+		} catch {
+			return null;
+		}
+	}
+
+	private collectPlaylistItemUris(row: {
+		uri?: string;
+		item?: {
+			uri?: string;
+			id?: string;
+			type?: string;
+			linked_from?: { uri?: string; id?: string };
+			track?: { uri?: string; id?: string; linked_from?: { uri?: string; id?: string } };
+		};
+		track?: { uri?: string; id?: string; linked_from?: { uri?: string; id?: string } } | null;
+	}): string[] {
+		const track =
+			row.track ||
+			row.item?.track ||
+			(row.item && row.item.type !== "episode" ? row.item : undefined);
+		const found = [
+			row.uri,
+			row.item?.uri,
+			track?.uri,
+			track?.linked_from?.uri,
+			row.item?.linked_from?.uri
+		];
+		const ids = [track?.id, track?.linked_from?.id, row.item?.id, row.item?.linked_from?.id];
+		for (const id of ids) {
+			if (id) {
+				found.push(`spotify:track:${id}`);
+			}
+		}
+		return found.filter((uri): uri is string => !!uri);
+	}
+
+	async loadPlaylistTrackUris(
+		settings: SpotifySettings,
+		playlistId: string,
+		revalidate = false
+	): Promise<Set<string> | null> {
+		const cached = this.playlistUriCache.get(playlistId);
+		if (cached && !revalidate) {
+			return cached.uris;
+		}
+		if (cached && revalidate) {
+			if (Date.now() - cached.snapshotCheckedAt < PLAYLIST_SNAPSHOT_TTL_MS) {
+				return cached.uris;
+			}
+			const snapshotId = await this.fetchPlaylistSnapshot(settings, playlistId);
+			if (snapshotId && snapshotId === cached.snapshotId) {
+				cached.snapshotCheckedAt = Date.now();
+				streamDeck.logger.debug(`[Spotify] Playlist snapshot unchanged: ${playlistId}`);
+				return cached.uris;
+			}
+			if (!snapshotId) {
+				cached.snapshotCheckedAt = Date.now();
+				streamDeck.logger.debug(
+					`[Spotify] Playlist snapshot unavailable - keeping cache: ${playlistId}`
+				);
+				return cached.uris;
+			}
+			if (!cached.snapshotId) {
+				cached.snapshotId = snapshotId;
+				cached.snapshotCheckedAt = Date.now();
+				return cached.uris;
+			}
+			streamDeck.logger.info(`[Spotify] Playlist snapshot changed - reloading ${playlistId}`);
+			this.playlistUriCache.delete(playlistId);
+			const uris = await this.reloadPlaylistTrackUris(settings, playlistId, snapshotId);
+			return uris;
+		}
+
+		const failedAt = this.playlistFetchFailedAt.get(playlistId);
+		if (failedAt && Date.now() - failedAt < PLAYLIST_FETCH_FAIL_COOLDOWN_MS) {
+			return this.playlistUriCache.get(playlistId)?.uris ?? null;
+		}
+		const inflight = this.playlistUriInFlight.get(playlistId);
+		if (inflight) {
+			return inflight;
+		}
+
+		return this.reloadPlaylistTrackUris(settings, playlistId, null);
+	}
+
+	private async reloadPlaylistTrackUris(
+		settings: SpotifySettings,
+		playlistId: string,
+		knownSnapshot: string | null
+	): Promise<Set<string> | null> {
+		const inflight = this.playlistUriInFlight.get(playlistId);
+		if (inflight) {
+			return inflight;
+		}
+
+		const promise = this.fetchPlaylistTrackUris(settings, playlistId);
+		this.playlistUriInFlight.set(playlistId, promise);
+		try {
+			const uris = await promise;
+			if (uris) {
+				const snapshotId = knownSnapshot ?? (await this.fetchPlaylistSnapshot(settings, playlistId));
+				this.rememberPlaylistCache(playlistId, uris, snapshotId);
+				this.playlistFetchFailedAt.delete(playlistId);
+			} else {
+				this.playlistFetchFailedAt.set(playlistId, Date.now());
+			}
+			return uris;
+		} finally {
+			if (this.playlistUriInFlight.get(playlistId) === promise) {
+				this.playlistUriInFlight.delete(playlistId);
+			}
+		}
+	}
+
+	private async fetchPlaylistTrackUris(
+		settings: SpotifySettings,
+		playlistId: string
+	): Promise<Set<string> | null> {
+		const uris = new Set<string>();
+		const limit = 50;
+		let offset = 0;
+		let path: "items" | "tracks" = "items";
+
+		for (let page = 0; page < 40; page += 1) {
+			const url = `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/${path}?limit=${limit}&offset=${offset}`;
+			const response = await this.requestWithAuth(settings, url, undefined, {
+				reason: "playlist-items",
+				priority: "background"
+			});
+			const canFallback =
+				path === "items" &&
+				response !== null &&
+				(response.status === 404 || response.status === 405 || response.status === 403);
+			if (canFallback) {
+				streamDeck.logger.info(
+					`[Spotify] Playlist /items HTTP ${response.status} - falling back to /tracks`
+				);
+				path = "tracks";
+				page -= 1;
+				continue;
+			}
+			if (!response || !response.ok) {
+				const body = response ? await response.text().catch(() => "") : "";
+				streamDeck.logger.warn(
+					`[Spotify] playlist items failed: ${response?.status ?? spotifyApiGateway.getLastError() ?? "no response"}${body ? ` ${body.slice(0, 180)}` : ""}`
+				);
+				return null;
+			}
+
+			try {
+				const data = (await response.json()) as {
+					items?: Array<{
+						uri?: string;
+						item?: {
+							uri?: string;
+							id?: string;
+							type?: string;
+							linked_from?: { uri?: string; id?: string };
+							track?: { uri?: string; id?: string; linked_from?: { uri?: string; id?: string } };
+						};
+						track?: { uri?: string; id?: string; linked_from?: { uri?: string; id?: string } } | null;
+					}>;
+					total?: number;
+				};
+				for (const row of data.items ?? []) {
+					for (const uri of this.collectPlaylistItemUris(row)) {
+						uris.add(uri);
+					}
+				}
+				offset += limit;
+				if (offset >= (data.total ?? 0) || (data.items?.length ?? 0) < limit) {
+					break;
+				}
+			} catch (e) {
+				streamDeck.logger.error("[Spotify] playlist items parse error: " + e);
+				return null;
+			}
+		}
+
+		streamDeck.logger.info(`[Spotify] Playlist cache loaded: ${playlistId} (${uris.size} uris)`);
+		return uris;
+	}
+
+	private playlistHasTrackUri(uris: Set<string>, uri: string): boolean {
+		if (uris.has(uri)) {
+			return true;
+		}
+		const id = uri.startsWith("spotify:track:") ? uri.slice("spotify:track:".length) : "";
+		return !!id && uris.has(`spotify:track:${id}`);
+	}
+
+	async isCurrentTrackInPlaylist(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		playlistId: string
+	): Promise<boolean | null> {
+		const uri =
+			this.getCachedUri(track.id) ??
+			(await this.resolveTrackUri(settings, track, "playlist-sync", false));
+		if (!uri) {
+			return null;
+		}
+		const uris = await this.loadPlaylistTrackUris(settings, playlistId, true);
+		if (!uris) {
+			return null;
+		}
+		return this.playlistHasTrackUri(uris, uri);
+	}
+
+	async toggleCurrentTrackInPlaylist(
+		settings: SpotifySettings,
+		track: SpotifyTrack,
+		playlistId: string,
+		playlistName: string
+	): Promise<{ ok: boolean; inPlaylist: boolean }> {
+		spotifyApiGateway.resetLastError();
+		const uri =
+			this.getCachedUri(track.id) ??
+			(await this.resolveTrackUri(settings, track, "toggle-like", true));
+		if (!uri) {
+			streamDeck.logger.warn(
+				`[Spotify] Playlist toggle failed: no uri for "${track.name}" by "${track.artist}"`
+			);
+			return { ok: false, inPlaylist: false };
+		}
+
+		const uris = await this.loadPlaylistTrackUris(settings, playlistId);
+		if (!uris) {
+			return { ok: false, inPlaylist: false };
+		}
+
+		const currentlyIn = this.playlistHasTrackUri(uris, uri);
+		const mutation = currentlyIn
+			? await this.removeUriFromPlaylist(settings, playlistId, playlistName, uri, track)
+			: await this.addUriToPlaylist(settings, playlistId, playlistName, uri, track);
+
+		if (!mutation.ok) {
+			return { ok: false, inPlaylist: currentlyIn };
+		}
+
+		if (currentlyIn) {
+			uris.delete(uri);
+		} else {
+			uris.add(uri);
+		}
+		this.rememberPlaylistCache(playlistId, uris, mutation.snapshotId);
+		return { ok: true, inPlaylist: !currentlyIn };
+	}
+
+	private async mutatePlaylistItems(
+		settings: SpotifySettings,
+		playlistId: string,
+		method: "POST" | "DELETE",
+		bodies: Array<{ path: "tracks" | "items"; body: string }>,
+		reason: "playlist-add" | "playlist-remove",
+		track: SpotifyTrack
+	): Promise<Response | null> {
+		let last: Response | null = null;
+		for (const attempt of bodies) {
+			const response = await this.requestWithAuth(
+				settings,
+				`https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/${attempt.path}`,
+				{
+					method,
+					headers: { "Content-Type": "application/json" },
+					body: attempt.body
+				},
+				{ reason, bypassQuota: true, track }
+			);
+			last = response;
+			if (response && (response.ok || response.status === 201)) {
+				return response;
+			}
+			if (
+				response &&
+				response.status !== 404 &&
+				response.status !== 405 &&
+				response.status !== 403
+			) {
+				return response;
+			}
+		}
+		return last;
+	}
+
+	private async readPlaylistSnapshot(response: Response): Promise<string | null> {
+		try {
+			const data = (await response.json()) as { snapshot_id?: string };
+			return data.snapshot_id?.trim() || null;
+		} catch {
+			return null;
+		}
+	}
+
+	private async addUriToPlaylist(
+		settings: SpotifySettings,
+		playlistId: string,
+		playlistName: string,
+		uri: string,
+		track: SpotifyTrack
+	): Promise<{ ok: boolean; snapshotId: string | null }> {
+		const payload = JSON.stringify({ uris: [uri] });
+		const response = await this.mutatePlaylistItems(
+			settings,
+			playlistId,
+			"POST",
+			[
+				{ path: "items", body: payload },
+				{ path: "tracks", body: payload }
+			],
+			"playlist-add",
+			track
+		);
+		if (!response) {
+			streamDeck.logger.warn(
+				`[Spotify] Playlist add failed: ${spotifyApiGateway.getLastError() ?? "no response"} playlist="${playlistName}" uri=${uri}`
+			);
+			return { ok: false, snapshotId: null };
+		}
+		if (response.status === 201 || response.ok) {
+			const snapshotId = await this.readPlaylistSnapshot(response);
+			streamDeck.logger.info(
+				`[Spotify] Added "${track.name}" to playlist "${playlistName}" uri=${uri}`
+			);
+			return { ok: true, snapshotId };
+		}
+		const body = await response.text().catch(() => "");
+		streamDeck.logger.warn(
+			`[Spotify] Playlist add failed: HTTP ${response.status} playlist="${playlistName}" ${body.slice(0, 180)}`
+		);
+		return { ok: false, snapshotId: null };
+	}
+
+	private async removeUriFromPlaylist(
+		settings: SpotifySettings,
+		playlistId: string,
+		playlistName: string,
+		uri: string,
+		track: SpotifyTrack
+	): Promise<{ ok: boolean; snapshotId: string | null }> {
+		const response = await this.mutatePlaylistItems(
+			settings,
+			playlistId,
+			"DELETE",
+			[
+				{ path: "items", body: JSON.stringify({ items: [{ uri }] }) },
+				{ path: "tracks", body: JSON.stringify({ tracks: [{ uri }] }) }
+			],
+			"playlist-remove",
+			track
+		);
+		if (!response) {
+			streamDeck.logger.warn(
+				`[Spotify] Playlist remove failed: ${spotifyApiGateway.getLastError() ?? "no response"} playlist="${playlistName}" uri=${uri}`
+			);
+			return { ok: false, snapshotId: null };
+		}
+		if (response.ok) {
+			const snapshotId = await this.readPlaylistSnapshot(response);
+			streamDeck.logger.info(
+				`[Spotify] Removed "${track.name}" from playlist "${playlistName}" uri=${uri}`
+			);
+			return { ok: true, snapshotId };
+		}
+		const body = await response.text().catch(() => "");
+		streamDeck.logger.warn(
+			`[Spotify] Playlist remove failed: HTTP ${response.status} playlist="${playlistName}" ${body.slice(0, 180)}`
+		);
+		return { ok: false, snapshotId: null };
 	}
 
 	private async getPlayerTrack(
@@ -441,21 +972,84 @@ export class SpotifyAPI {
 			);
 			return null;
 		}
+		if (response.ok) {
+			const data = (await response.json()) as boolean[];
+			const isLiked = data[0] === true;
+			this.rememberContains(uri, isLiked);
+			return isLiked;
+		}
+
 		if (response.status === 403) {
+			// Gateway already classified country blocks as geo_blocked - skip useless fallback
+			if (spotifyApiGateway.getLastError() === "geo_blocked") {
+				return null;
+			}
+			const body = await response.text().catch(() => "");
+			if (/unavailable in this country/i.test(body)) {
+				streamDeck.logger.warn(`[Spotify] isSaved geo-blocked: ${body.slice(0, 120)}`);
+				return null;
+			}
+			if (uri.startsWith("spotify:track:")) {
+				streamDeck.logger.warn(
+					`[Spotify] isSaved library 403, trying tracks/contains fallback${body ? `: ${body.slice(0, 200)}` : ""}`
+				);
+				return this.isSavedTrackIdFallback(
+					settings,
+					uri.slice("spotify:track:".length),
+					bypassThrottle,
+					track
+				);
+			}
 			streamDeck.logger.error(
-				`[Spotify] isSaved forbidden (403) - re-authorize via Spotify Setup (user-library-read scope)`
+				`[Spotify] isSaved forbidden (403)${body ? `: ${body.slice(0, 200)}` : ""} - re-authorize via Spotify Setup if this persists`
+			);
+			return null;
+		}
+
+		streamDeck.logger.error(
+			`[Spotify] isSaved failed: ${response.status} ${await response.text()}`
+		);
+		return null;
+	}
+
+	private async isSavedTrackIdFallback(
+		settings: SpotifySettings,
+		trackId: string,
+		bypassThrottle: boolean,
+		track?: SpotifyTrack
+	): Promise<boolean | null> {
+		const response = await this.requestWithAuth(
+			settings,
+			`https://api.spotify.com/v1/me/tracks/contains?ids=${encodeURIComponent(trackId)}`,
+			undefined,
+			{
+				bypassQuota: bypassThrottle,
+				reason: "contains-tracks-fallback",
+				track
+			}
+		);
+		if (!response) return null;
+		if (response.status === 429) {
+			streamDeck.logger.warn(
+				`[Spotify] isSaved tracks fallback 429 retry-after=${response.headers.get("Retry-After") ?? "none"}`
 			);
 			return null;
 		}
 		if (!response.ok) {
+			if (spotifyApiGateway.getLastError() === "geo_blocked") {
+				return null;
+			}
 			streamDeck.logger.error(
-				`[Spotify] isSaved failed: ${response.status} ${await response.text()}`
+				`[Spotify] isSaved tracks fallback failed: ${response.status} ${await response.text()}`
 			);
 			return null;
 		}
 		const data = (await response.json()) as boolean[];
 		const isLiked = data[0] === true;
-		this.rememberContains(uri, isLiked);
+		this.rememberContains(`spotify:track:${trackId}`, isLiked);
+		streamDeck.logger.info(
+			`[Spotify] isSaved recovered via tracks/contains fallback (${isLiked ? "liked" : "not liked"})`
+		);
 		return isLiked;
 	}
 
@@ -482,14 +1076,59 @@ export class SpotifyAPI {
 			);
 			return false;
 		}
-		if (!response.ok) {
-			streamDeck.logger.error(
-				`[Spotify] ${method === "PUT" ? "save" : "remove"} failed: ${response.status} ${await response.text()}`
-			);
-			return false;
+		if (response.ok || response.status === 204) {
+			this.rememberContains(uri, method === "PUT");
+			return true;
 		}
-		this.rememberContains(uri, method === "PUT");
-		return true;
+
+		if (response.status === 403) {
+			if (spotifyApiGateway.getLastError() === "geo_blocked") {
+				streamDeck.logger.warn(
+					`[Spotify] ${method === "PUT" ? "save" : "remove"} blocked: Spotify unavailable in this country (VPN/proxy/DNS)`
+				);
+				return false;
+			}
+			if (uri.startsWith("spotify:track:")) {
+				const trackId = uri.slice("spotify:track:".length);
+				streamDeck.logger.warn(
+					`[Spotify] ${method === "PUT" ? "save" : "remove"} library 403, trying tracks fallback`
+				);
+				const fallback = await this.requestWithAuth(
+					settings,
+					`https://api.spotify.com/v1/me/tracks?ids=${encodeURIComponent(trackId)}`,
+					{ method },
+					{
+						bypassQuota: true,
+						reason: method === "PUT" ? "like-tracks-fallback" : "unlike-tracks-fallback",
+						track
+					}
+				);
+				if (fallback && (fallback.ok || fallback.status === 204)) {
+					this.rememberContains(uri, method === "PUT");
+					streamDeck.logger.info(
+						`[Spotify] ${method === "PUT" ? "save" : "remove"} recovered via tracks fallback`
+					);
+					return true;
+				}
+				if (fallback && spotifyApiGateway.getLastError() === "geo_blocked") {
+					streamDeck.logger.warn(
+						`[Spotify] ${method === "PUT" ? "save" : "remove"} tracks fallback geo-blocked`
+					);
+					return false;
+				}
+				if (fallback) {
+					streamDeck.logger.error(
+						`[Spotify] ${method === "PUT" ? "save" : "remove"} tracks fallback failed: ${fallback.status} ${await fallback.text()}`
+					);
+				}
+				return false;
+			}
+		}
+
+		streamDeck.logger.error(
+			`[Spotify] ${method === "PUT" ? "save" : "remove"} failed: ${response.status} ${await response.text()}`
+		);
+		return false;
 	}
 
 	private stripApostrophes(value: string): string {
@@ -751,13 +1390,19 @@ export class SpotifyAPI {
 	private async resolveTrackUriInner(
 		settings: SpotifySettings,
 		track: SpotifyTrack,
-		reason: string
+		reason: string,
+		bypassQuota = false
 	): Promise<string | null> {
 		const previousUri = this.uriCache.get(track.id);
-		const bypassQuota = reason === "toggle-like";
+		const shouldBypassQuota =
+			bypassQuota ||
+			reason === "toggle-like" ||
+			reason === "track-changed" ||
+			reason === "playing-changed" ||
+			reason === "like-button-appear";
 		this.lastResolveSource = "none";
 
-		const playerTrack = await this.resolvePlayerTrack(settings, track, reason, bypassQuota);
+		const playerTrack = await this.resolvePlayerTrack(settings, track, reason, shouldBypassQuota);
 		if (playerTrack) {
 			const replaced = this.rememberUri(track.id, playerTrack.uri, true);
 			if (replaced) {
@@ -773,7 +1418,7 @@ export class SpotifyAPI {
 			return playerTrack.uri;
 		}
 
-		const search = await this.searchResolveTrackUri(settings, track, reason, bypassQuota);
+		const search = await this.searchResolveTrackUri(settings, track, reason, shouldBypassQuota);
 		if (search.ambiguous) {
 			if (previousUri) {
 				this.forgetCachedUri(track.id);
@@ -819,7 +1464,8 @@ export class SpotifyAPI {
 	async resolveTrackUri(
 		settings: SpotifySettings,
 		track: SpotifyTrack,
-		reason = "unknown"
+		reason = "unknown",
+		bypassQuota = false
 	): Promise<string | null> {
 		if (track.uri.startsWith("spotify:")) {
 			return track.uri;
@@ -830,7 +1476,7 @@ export class SpotifyAPI {
 			return inflight;
 		}
 
-		const promise = this.resolveTrackUriInner(settings, track, reason);
+		const promise = this.resolveTrackUriInner(settings, track, reason, bypassQuota);
 		this.resolveInFlight.set(track.id, promise);
 		try {
 			return await promise;
@@ -856,8 +1502,9 @@ export class SpotifyAPI {
 		settings: SpotifySettings,
 		track: SpotifyTrack,
 		reason = "unknown",
-		options?: { bypassContainsThrottle?: boolean }
+		options?: { bypassContainsThrottle?: boolean; bypassQuota?: boolean }
 	): Promise<boolean | null> {
+		const bypassQuota = options?.bypassQuota === true || options?.bypassContainsThrottle === true;
 		let uri: string | null = null;
 
 		if (track.uri.startsWith("spotify:")) {
@@ -868,7 +1515,7 @@ export class SpotifyAPI {
 				return null;
 			}
 		} else {
-			uri = await this.resolveTrackUri(settings, track, reason);
+			uri = await this.resolveTrackUri(settings, track, reason, bypassQuota);
 		}
 
 		if (!uri) {
@@ -878,14 +1525,14 @@ export class SpotifyAPI {
 			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): episode "${track.name}"`);
 			return false;
 		}
-		return this.isTrackSaved(settings, uri, options?.bypassContainsThrottle === true, track);
+		return this.isTrackSaved(settings, uri, bypassQuota, track);
 	}
 
 	async setLike(settings: SpotifySettings, track: SpotifyTrack, liked: boolean): Promise<boolean> {
 		spotifyApiGateway.resetLastError();
 		const action = liked ? "like" : "unlike";
 		const previousUri = this.getCachedUri(track.id);
-		const uri = await this.resolveTrackUri(settings, track, "toggle-like");
+		const uri = await this.resolveTrackUri(settings, track, "toggle-like", true);
 		const source = this.lastResolveSource;
 		if (!uri) {
 			const reason =

@@ -7,12 +7,35 @@ import type { SpotifySettings } from "./types";
 const execAsync = promisify(exec);
 
 export const REDIRECT_URI = "http://127.0.0.1:5789/callback";
+export const PLAYLIST_SCOPES = [
+	"playlist-read-private",
+	"playlist-read-collaborative",
+	"playlist-modify-public",
+	"playlist-modify-private"
+] as const;
+
+/** Minimum scopes to list/toggle playlists - collaborative is requested but not required */
+export const PLAYLIST_REQUIRED_SCOPES = [
+	"playlist-read-private",
+	"playlist-modify-public",
+	"playlist-modify-private"
+] as const;
+
 export const SCOPES = [
 	"user-read-playback-state",
 	"user-modify-playback-state",
 	"user-library-read",
-	"user-library-modify"
+	"user-library-modify",
+	...PLAYLIST_SCOPES
 ].join(" ");
+
+export function hasGrantedScopes(granted: string | undefined, required: readonly string[]): boolean {
+	if (!granted) {
+		return false;
+	}
+	const set = new Set(granted.split(/\s+/).filter(Boolean));
+	return required.every((scope) => set.has(scope));
+}
 
 type SetupCallback = (clientId: string, clientSecret: string, appName?: string) => Promise<void>;
 
@@ -90,13 +113,15 @@ class SpotifyAuth {
 				access_token: string;
 				refresh_token: string;
 				expires_in: number;
+				scope?: string;
 			};
 
 			return {
 				...settings,
 				accessToken: data.access_token,
 				refreshToken: data.refresh_token,
-				tokenExpiry: Date.now() + data.expires_in * 1000
+				tokenExpiry: Date.now() + data.expires_in * 1000,
+				...(data.scope ? { oauthScopes: data.scope } : {})
 			};
 		} catch {
 			return settings;
@@ -138,12 +163,16 @@ class SpotifyAuth {
 				access_token: string;
 				expires_in: number;
 				refresh_token?: string;
+				scope?: string;
 			};
 
 			settings.accessToken = data.access_token;
 			settings.tokenExpiry = Date.now() + data.expires_in * 1000;
 			if (data.refresh_token) {
 				settings.refreshToken = data.refresh_token;
+			}
+			if (data.scope) {
+				settings.oauthScopes = data.scope;
 			}
 			await saveSpotifySettings(settings);
 			return true;

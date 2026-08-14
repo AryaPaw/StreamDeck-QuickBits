@@ -1,4 +1,4 @@
-import {
+import streamDeck, {
 	action,
 	KeyDownEvent,
 	SingletonAction,
@@ -12,6 +12,7 @@ import {
 	spotifyState,
 	SpotifyPlaybackState
 } from "../shared/spotify";
+import { spotifyApiGateway } from "../shared/spotify/api-gateway";
 
 const LIKE_IMAGE = "imgs/actions/spotify/like";
 const LIKED_IMAGE = "imgs/actions/spotify/liked";
@@ -61,7 +62,14 @@ export class SpotifyLikeAction extends SingletonAction {
 			const success = await spotifyAPI.setLike(settings, track, newLiked);
 			if (!success) {
 				spotifyState.setLikedOptimistic(isLiked);
-				spotifyState.refreshLikeApiStatus();
+				if (spotifyApiGateway.getLastError() === "geo_blocked") {
+					spotifyState.markGeoBlocked();
+					streamDeck.logger.warn(
+						`[Spotify] Like blocked by geo/VPN - fix network exit country, then retry`
+					);
+				} else {
+					spotifyState.refreshLikeApiStatus();
+				}
 				await ev.action.showAlert();
 				return;
 			}
@@ -85,14 +93,11 @@ export class SpotifyLikeAction extends SingletonAction {
 			return;
 		}
 
-		if (state.likeApiStatus === "no_auth") {
-			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
-			return;
-		}
-
 		if (
-			!state.likeKnown &&
-			(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited")
+			state.likeApiStatus === "no_auth" ||
+			state.likeApiStatus === "geo_blocked" ||
+			(!state.likeKnown &&
+				(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited"))
 		) {
 			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
 			return;

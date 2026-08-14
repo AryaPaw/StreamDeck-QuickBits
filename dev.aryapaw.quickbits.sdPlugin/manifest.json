@@ -1,6 +1,6 @@
 {
 	"Name": "QuickBits",
-	"Version": "0.1.0.46",
+	"Version": "0.1.0.60",
 	"Author": "AryaPaw",
 	"Actions": [
 		{
@@ -74,6 +74,22 @@
 			"Tooltip": "Add or remove current track from liked songs",
 			"Controllers": ["Keypad"],
 			"States": [{ "Image": "imgs/actions/spotify/like" }]
+		},
+		{
+			"Name": "Spotify: Playlist Like",
+			"UUID": "dev.aryapaw.quickbits.spotify-add-to-playlist",
+			"Icon": "imgs/actions/spotify/like",
+			"Tooltip": "Like/unlike the current track in a playlist chosen in settings",
+			"PropertyInspectorPath": "ui/spotify-add-to-playlist.html",
+			"Controllers": ["Keypad"],
+			"States": [
+				{
+					"Image": "imgs/actions/spotify/like",
+					"TitleAlignment": "bottom",
+					"FontSize": 10,
+					"ShowTitle": false
+				}
+			]
 		}
 	],
 	"Category": "Quickbits",

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<title>Playlist Like</title>
+	<script src="sdpi-components.js"></script>
+	<style>
+		.hint {
+			padding: 8px 12px;
+			font-size: 12px;
+			line-height: 1.45;
+			color: #ccc;
+		}
+		.status {
+			padding: 8px 12px;
+			font-size: 12px;
+			color: #f87171;
+		}
+		.status.ok {
+			color: #1DB954;
+		}
+	</style>
+</head>
+<body>
+	<sdpi-wrapper>
+		<div class="hint">
+			Same as Like, but for the selected playlist. Changing the playlist updates the key name.
+		</div>
+		<sdpi-item label="Playlist">
+			<sdpi-select
+				id="playlistSelect"
+				setting="playlistId"
+				label-setting="playlistName"
+				value-type="string"
+				datasource="playlists"
+				show-refresh
+				placeholder="Select a playlist"
+				loading="Loading playlists..."
+			></sdpi-select>
+		</sdpi-item>
+		<div id="status" class="status"></div>
+	</sdpi-wrapper>
+	<script>
+		const statusEl = document.getElementById("status");
+
+		function setStatus(message, ok) {
+			statusEl.textContent = message || "";
+			statusEl.className = "status" + (ok ? " ok" : "");
+		}
+
+		(function watchClient() {
+			const client = window.SDPIComponents && window.SDPIComponents.streamDeckClient;
+			if (!client || !client.sendToPropertyInspector) {
+				return;
+			}
+			client.sendToPropertyInspector.subscribe(function (msg) {
+				const payload = msg && msg.payload;
+				if (!payload || payload.event !== "playlists") {
+					return;
+				}
+				if (payload.ok === false) {
+					setStatus(payload.error || "Failed to load playlists", false);
+					return;
+				}
+				const count = Array.isArray(payload.items) ? payload.items.length : 0;
+				setStatus(count + " playlists", true);
+			});
+		})();
+	</script>
+</body>
+</html>

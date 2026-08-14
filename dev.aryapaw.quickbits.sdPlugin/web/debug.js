@@ -6,6 +6,10 @@ const kindFilter = document.getElementById("kindFilter");
 const bucketFilter = document.getElementById("bucketFilter");
 const hoursFilter = document.getElementById("hoursFilter");
 const exportBtn = document.getElementById("exportBtn");
+const testApiBtn = document.getElementById("testApiBtn");
+const testPanel = document.getElementById("testPanel");
+const testSummary = document.getElementById("testSummary");
+const testResult = document.getElementById("testResult");
 
 let chart = null;
 let lastEvents = [];
@@ -214,6 +218,35 @@ hoursFilter.addEventListener("change", () => {
 });
 exportBtn.addEventListener("click", () => {
 	window.location.href = "/debug/api/export";
+});
+
+testApiBtn.addEventListener("click", async () => {
+	testPanel.hidden = false;
+	testApiBtn.disabled = true;
+	testSummary.textContent = "Running…";
+	testSummary.style.color = "#888";
+	testResult.textContent = "";
+	try {
+		const res = await fetch("/debug/api/test", { method: "POST" });
+		const data = await res.json();
+		testSummary.textContent = data.summary || (data.ok ? "OK" : "Failed");
+		testSummary.style.color = data.ok ? "#1DB954" : "#f87171";
+		const lines = (data.steps || []).map((s) => {
+			const mark = s.ok ? "OK" : "FAIL";
+			const status = s.status != null ? ` HTTP ${s.status}` : "";
+			return `[${mark}] ${s.name}${status} (${s.ms}ms)\n  ${s.detail}`;
+		});
+		lines.push("");
+		lines.push(`at ${data.at}`);
+		lines.push(`likeApiStatus=${data.likeApiStatus}`);
+		testResult.textContent = lines.join("\n");
+	} catch (e) {
+		testSummary.textContent = "Request failed";
+		testSummary.style.color = "#f87171";
+		testResult.textContent = String(e);
+	} finally {
+		testApiBtn.disabled = false;
+	}
 });
 
 refresh();

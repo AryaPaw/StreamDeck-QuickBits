@@ -22,7 +22,22 @@ const TRANSPORT_PLAYING_GRACE_MS = 500;
 const LIKE_SKIP_AFTER_TOGGLE_MS = 5_000;
 const LIKE_CACHE_HIT_GRACE_MS = 15_000;
 const MAX_LIKE_RETRIES = 1;
-const RETRY_SCHEDULE_REASONS = new Set(["track-changed", "like-button-appear", "retry"]);
+const LIKE_RECOVERY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000, 45_000, 60_000] as const;
+/** Geo/VPN blocks clear slowly - do not hammer API or force token refresh */
+const LIKE_GEO_RECOVERY_DELAYS_MS = [60_000, 120_000, 180_000, 300_000] as const;
+const RETRY_SCHEDULE_REASONS = new Set([
+	"track-changed",
+	"like-button-appear",
+	"playing-changed",
+	"recovery",
+	"retry"
+]);
+const BYPASS_DAILY_BUDGET_REASONS = new Set([
+	"track-changed",
+	"playing-changed",
+	"like-button-appear",
+	"recovery"
+]);
 const MAX_LIKED_CACHE_ENTRIES = 200;
 const PLAYING_OPTIMISTIC_HOLD_MS = 2_000;
 
@@ -54,6 +69,8 @@ class SpotifyState {
 	private likeRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private likeRetryCount = 0;
 	private likeRetryTrackId: string | null = null;
+	private likeRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+	private likeRecoveryAttempt = 0;
 	private likeCacheHydrated = false;
 	private likeSkipUntil = 0;
 	private playingOptimisticUntil = 0;
@@ -92,6 +109,7 @@ class SpotifyState {
 		this.likeSyncRefs = Math.max(0, this.likeSyncRefs - 1);
 		if (this.likeSyncRefs === 0) {
 			this.stopLikeTimers();
+			this.likeRecoveryAttempt = 0;
 		}
 	}
 
@@ -160,6 +178,25 @@ class SpotifyState {
 		for (const listener of this.listeners) {
 			listener(state);
 		}
+	}
+
+	private isLikeStatusDegraded(): boolean {
+		return (
+			this.currentState.likeApiStatus === "unavailable" ||
+			this.currentState.likeApiStatus === "rate_limited" ||
+			this.currentState.likeApiStatus === "geo_blocked"
+		);
+	}
+
+	private needsLikeRecovery(): boolean {
+		if (this.likeSyncRefs === 0) {
+			return false;
+		}
+		// Soft-cached heart during geo still needs background re-verify
+		if (this.currentState.likeApiStatus === "geo_blocked") {
+			return true;
+		}
+		return !this.currentState.likeKnown && this.isLikeStatusDegraded();
 	}
 
 	private getCachedLike(trackId: string): LikedCacheEntry | null {
@@ -255,6 +292,7 @@ class SpotifyState {
 		let track = mapLocalStateToTrack(local);
 		let isLiked = this.currentState.isLiked;
 		let likeKnown = this.currentState.likeKnown;
+		let likeApiStatus = this.currentState.likeApiStatus;
 		let trackChanged = false;
 
 		if (!track) {
@@ -288,9 +326,14 @@ class SpotifyState {
 				this.pausedSince = 0;
 				this.likeRetryCount = 0;
 				this.likeRetryTrackId = track.id;
+				this.likeRecoveryAttempt = 0;
 				if (this.likeRetryTimer) {
 					clearTimeout(this.likeRetryTimer);
 					this.likeRetryTimer = null;
+				}
+				if (this.likeRecoveryTimer) {
+					clearTimeout(this.likeRecoveryTimer);
+					this.likeRecoveryTimer = null;
 				}
 
 				const cached = this.getCachedLikeForTrack(track);
@@ -308,13 +351,17 @@ class SpotifyState {
 					this.autoAdvancePlayingUntil = Date.now() + AUTO_ADVANCE_PLAYING_MS;
 					track = { ...track, isPlaying: true };
 				}
+
+				likeApiStatus = this.probeLikeApiStatus(track);
 			}
 		}
 
 		const playbackStateChanged = this.currentState.playbackState !== playbackState;
 		const playingChanged = this.currentState.track?.isPlaying !== track?.isPlaying;
 		const likedChanged =
-			this.currentState.isLiked !== isLiked || this.currentState.likeKnown !== likeKnown;
+			this.currentState.isLiked !== isLiked ||
+			this.currentState.likeKnown !== likeKnown ||
+			this.currentState.likeApiStatus !== likeApiStatus;
 		const artChanged =
 			this.currentState.track?.albumArtBase64 !== track?.albumArtBase64 ||
 			this.currentState.track?.albumArtPath !== track?.albumArtPath;
@@ -335,7 +382,7 @@ class SpotifyState {
 			metaChanged ||
 			(track === null && hadTrack)
 		) {
-			this.currentState = { ...this.currentState, track, playbackState, isLiked, likeKnown };
+			this.currentState = { ...this.currentState, track, playbackState, isLiked, likeKnown, likeApiStatus };
 			this.emit(this.currentState);
 		}
 
@@ -344,6 +391,8 @@ class SpotifyState {
 			if (this.likeSyncRefs > 0) {
 				void this.enrichIsLiked(track, "track-changed");
 			}
+		} else if (playingChanged && track && this.needsLikeRecovery()) {
+			void this.enrichIsLiked(track, "playing-changed");
 		}
 	}
 
@@ -351,6 +400,45 @@ class SpotifyState {
 		if (this.likeRetryTimer) {
 			clearTimeout(this.likeRetryTimer);
 			this.likeRetryTimer = null;
+		}
+		if (this.likeRecoveryTimer) {
+			clearTimeout(this.likeRecoveryTimer);
+			this.likeRecoveryTimer = null;
+		}
+	}
+
+	private scheduleDegradedRecovery(track: SpotifyTrack): void {
+		if (!this.needsLikeRecovery() || this.likeRecoveryTimer || this.likeRetryTimer) {
+			return;
+		}
+
+		const delays =
+			this.currentState.likeApiStatus === "geo_blocked"
+				? LIKE_GEO_RECOVERY_DELAYS_MS
+				: LIKE_RECOVERY_DELAYS_MS;
+		const delayIndex = Math.min(this.likeRecoveryAttempt, delays.length - 1);
+		const delay = delays[delayIndex]!;
+		this.likeRecoveryAttempt += 1;
+
+		streamDeck.logger.info(
+			`[Spotify] Like recovery ${this.likeRecoveryAttempt} for "${track.name}" in ${Math.ceil(delay / 1000)}s (status=${this.currentState.likeApiStatus})`
+		);
+
+		this.likeRecoveryTimer = setTimeout(() => {
+			this.likeRecoveryTimer = null;
+			const current = this.currentState.track;
+			if (!current || this.likeSyncRefs === 0 || !this.needsLikeRecovery()) {
+				return;
+			}
+			void this.enrichIsLiked(current, "recovery");
+		}, delay);
+	}
+
+	private clearDegradedRecovery(): void {
+		this.likeRecoveryAttempt = 0;
+		if (this.likeRecoveryTimer) {
+			clearTimeout(this.likeRecoveryTimer);
+			this.likeRecoveryTimer = null;
 		}
 	}
 
@@ -429,6 +517,15 @@ class SpotifyState {
 		this.updateLikeApiStatus(this.probeLikeApiStatus(this.currentState.track));
 	}
 
+	/** Keep geo status after a failed manual like - probe would wrongly reset to ok */
+	markGeoBlocked(): void {
+		this.updateLikeApiStatus("geo_blocked");
+		const track = this.currentState.track;
+		if (track) {
+			this.scheduleDegradedRecovery(track);
+		}
+	}
+
 	private async enrichIsLiked(track: SpotifyTrack, reason: string): Promise<void> {
 		const trackId = track.id;
 		const trackCtx = { title: track.name, artist: track.artist };
@@ -479,16 +576,21 @@ class SpotifyState {
 				likeApiStatus: "ok"
 			};
 			this.emit(this.currentState);
+			this.clearDegradedRecovery();
 			return;
 		}
 
 		if (reason === "retry" && spotifyRateLimit.shouldThrottle()) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:server-blocked`, "/me/library/contains", "library", trackCtx);
 			this.scheduleLikeRetry(track, reason);
+			this.scheduleDegradedRecovery(track);
 			return;
 		}
 
-		if (spotifyApiGateway.isDailyBackgroundBudgetExhausted()) {
+		if (
+			spotifyApiGateway.isDailyBackgroundBudgetExhausted() &&
+			!BYPASS_DAILY_BUDGET_REASONS.has(reason)
+		) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:daily-budget`, "/me/library/contains", "library", trackCtx);
 			const cachedDaily = this.getCachedLikeForTrack(track);
 			if (cachedDaily) {
@@ -499,8 +601,10 @@ class SpotifyState {
 					likeApiStatus: "ok"
 				};
 				this.emit(this.currentState);
+				this.clearDegradedRecovery();
 			} else {
 				this.updateLikeApiStatus("unavailable");
+				this.scheduleDegradedRecovery(track);
 			}
 			return;
 		}
@@ -542,6 +646,7 @@ class SpotifyState {
 				this.emit(this.currentState);
 			}
 			this.scheduleLikeRetry(track, reason);
+			this.scheduleDegradedRecovery(track);
 			return;
 		}
 
@@ -553,19 +658,48 @@ class SpotifyState {
 				likeApiStatus: "ok"
 			};
 			this.emit(this.currentState);
+			this.clearDegradedRecovery();
 		}
 
-		const isLiked = await this.fetchIsLiked(track, reason);
+		const bypassQuota = BYPASS_DAILY_BUDGET_REASONS.has(reason);
+		const isLiked = await this.fetchIsLiked(track, reason, bypassQuota);
 		const resolvedUri = spotifyAPI.getCachedUri(trackId) ?? "unknown";
 		if (trackId !== this.lastTrackId || !this.currentState.track) {
 			return;
 		}
 
 		if (isLiked === null) {
-			const fetchStatus: SpotifyLikeApiStatus = spotifyRateLimit.shouldThrottle()
-				? "rate_limited"
-				: "unavailable";
+			const lastError = spotifyApiGateway.getLastError();
+			const fetchStatus: SpotifyLikeApiStatus =
+				lastError === "geo_blocked"
+					? "geo_blocked"
+					: spotifyRateLimit.shouldThrottle()
+						? "rate_limited"
+						: "unavailable";
 			const displayStatus = this.resolveDisplayApiStatus(track, fetchStatus);
+
+			// Soft-display last known like during geo/VPN blocks so the key is not stuck on !
+			if (fetchStatus === "geo_blocked") {
+				const soft = this.getCachedLike(trackId) ?? this.getCachedLikeForTrack(track) ?? cached;
+				if (soft) {
+					streamDeck.logger.info(
+						`[Spotify] Using soft cached like for "${track.name}" during geo block (${soft.isLiked ? "liked" : "not liked"})`
+					);
+					this.currentState = {
+						...this.currentState,
+						isLiked: soft.isLiked,
+						likeKnown: true,
+						likeApiStatus: "geo_blocked"
+					};
+					this.emit(this.currentState);
+				} else {
+					this.updateLikeApiStatus("geo_blocked");
+				}
+				// No short retry - geo clears slowly
+				this.scheduleDegradedRecovery(track);
+				return;
+			}
+
 			this.updateLikeApiStatus(displayStatus);
 
 			if (cached) {
@@ -582,11 +716,13 @@ class SpotifyState {
 			}
 
 			this.scheduleLikeRetry(track, reason);
+			this.scheduleDegradedRecovery(track);
 			return;
 		}
 
 		this.rememberLiked(trackId, isLiked);
 		this.updateLikeApiStatus("ok");
+		this.clearDegradedRecovery();
 
 		if (this.currentState.isLiked === isLiked && this.currentState.likeKnown) {
 			streamDeck.logger.debug(
@@ -607,7 +743,11 @@ class SpotifyState {
 		this.emit(this.currentState);
 	}
 
-	private async fetchIsLiked(track: SpotifyTrack, reason: string): Promise<boolean | null> {
+	private async fetchIsLiked(
+		track: SpotifyTrack,
+		reason: string,
+		bypassQuota = false
+	): Promise<boolean | null> {
 		const settings = getSpotifySettings();
 		if (!settings.refreshToken) {
 			streamDeck.logger.warn(
@@ -619,7 +759,9 @@ class SpotifyState {
 		const oldUri = spotifyAPI.getCachedUri(track.id);
 		this.likedCheckInFlight = true;
 		try {
-			const result = await spotifyAPI.isTrackLiked(settings, track, reason);
+			const result = await spotifyAPI.isTrackLiked(settings, track, reason, {
+				bypassQuota
+			});
 			const newUri = spotifyAPI.getCachedUri(track.id);
 			if (newUri && oldUri && newUri !== oldUri) {
 				this.likedResultCache.delete(track.id);

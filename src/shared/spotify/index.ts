@@ -3,7 +3,8 @@ export type {
 	SpotifyTrack,
 	PlaybackStateName,
 	SpotifyLikeApiStatus,
-	SpotifyPlaybackState
+	SpotifyPlaybackState,
+	SpotifyPlaylistOption
 } from "./types";
 
 export {

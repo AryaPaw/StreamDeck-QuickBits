@@ -10,6 +10,7 @@ export type ApiRequestPriority = "manual" | "normal" | "background";
 export type ApiGatewayOptions = {
 	method?: "GET" | "PUT" | "DELETE" | "POST";
 	headers?: Record<string, string>;
+	body?: string;
 	priority?: ApiRequestPriority;
 	reason?: string;
 	bypassQuota?: boolean;
@@ -29,6 +30,16 @@ function endpointLabel(url: string): string {
 	} catch {
 		return url;
 	}
+}
+
+const REQUEST_TIMEOUT_MS = 12_000;
+
+function isGeoBlockedBody(body: string): boolean {
+	return /unavailable in this country/i.test(body);
+}
+
+function isPlaylistEndpointForbidden(url: string, body: string): boolean {
+	return url.includes("/playlists/") && /"message"\s*:\s*"Forbidden"/i.test(body);
 }
 
 class SpotifyApiGateway {
@@ -255,20 +266,70 @@ class SpotifyApiGateway {
 			return null;
 		}
 
-		const doFetch = (authToken: string) => {
+		const doFetch = async (authToken: string): Promise<Response> => {
 			const headers = { ...(ctx.headers ?? {}), Authorization: `Bearer ${authToken}` };
-			return fetch(url, { method: ctx.method, headers });
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+			try {
+				return await fetch(url, {
+					method: ctx.method,
+					headers,
+					body: ctx.body,
+					signal: controller.signal
+				});
+			} finally {
+				clearTimeout(timeout);
+			}
 		};
 
 		try {
 			let response = await doFetch(token);
 			if (response.status === 401) {
+				streamDeck.logger.info(
+					`[Spotify] API 401 on ${ctx.endpoint} (${ctx.reason}) - forcing token refresh`
+				);
 				token = await spotifyAuth.ensureAccessToken(settings, true);
 				if (!token) {
 					this.setLastError("no access token");
 					return null;
 				}
 				response = await doFetch(token);
+			} else if (response.status === 403) {
+				const body = await response.clone().text().catch(() => "");
+				if (isGeoBlockedBody(body)) {
+					this.setLastError("geo_blocked");
+					streamDeck.logger.warn(
+						`[Spotify] API geo-blocked on ${ctx.endpoint} (${ctx.reason}): Spotify unavailable in this country`
+					);
+					return response;
+				}
+				if (isPlaylistEndpointForbidden(url, body)) {
+					this.setLastError("forbidden");
+					streamDeck.logger.warn(
+						`[Spotify] API 403 on ${ctx.endpoint} (${ctx.reason}) - not refreshing token`
+					);
+					return response;
+				}
+				streamDeck.logger.info(
+					`[Spotify] API 403 on ${ctx.endpoint} (${ctx.reason}) - forcing token refresh`
+				);
+				token = await spotifyAuth.ensureAccessToken(settings, true);
+				if (!token) {
+					this.setLastError("no access token");
+					return null;
+				}
+				response = await doFetch(token);
+				if (response.status === 403) {
+					const retryBody = await response.clone().text().catch(() => "");
+					if (isGeoBlockedBody(retryBody)) {
+						this.setLastError("geo_blocked");
+						streamDeck.logger.warn(
+							`[Spotify] API geo-blocked on ${ctx.endpoint} after refresh (${ctx.reason})`
+						);
+					} else {
+						this.setLastError("forbidden");
+					}
+				}
 			}
 
 			if (response.status === 429) {
@@ -291,9 +352,14 @@ class SpotifyApiGateway {
 
 			return response;
 		} catch (e) {
-			const msg = e instanceof Error ? e.message : String(e);
+			const msg =
+				e instanceof Error && e.name === "AbortError"
+					? `timeout after ${REQUEST_TIMEOUT_MS}ms`
+					: e instanceof Error
+						? e.message
+						: String(e);
 			this.setLastError(msg);
-			streamDeck.logger.error(`[Spotify] request failed: ${url} ${e}`);
+			streamDeck.logger.error(`[Spotify] request failed: ${url} ${msg}`);
 			return null;
 		}
 	}

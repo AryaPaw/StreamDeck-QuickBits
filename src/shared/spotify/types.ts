@@ -15,6 +15,8 @@ export type SpotifySettings = {
 	accountDisplayName?: string;
 	/** Persisted Spotify 429 cooldown deadline (epoch ms) */
 	apiBlockedUntil?: number;
+	/** Space-separated scopes from the last token response */
+	oauthScopes?: string;
 };
 
 export type SpotifyTrack = {
@@ -32,7 +34,7 @@ export type SpotifyTrack = {
 	duration: number;
 };
 
-export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavailable";
+export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavailable" | "geo_blocked";
 
 export type PlaybackStateName = "playing" | "paused" | "stopped" | "unknown";
 
@@ -59,6 +61,13 @@ export type SpotifyCurrentlyPlaying = {
 	is_playing: boolean;
 	progress_ms: number;
 	item: SpotifyPlayingItem | null;
+};
+
+export type SpotifyPlaylistOption = {
+	id: string;
+	name: string;
+	ownerId: string;
+	collaborative: boolean;
 };
 
 export type StateListener = (state: SpotifyPlaybackState) => void;
