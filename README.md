@@ -20,6 +20,7 @@ Hobby project — not on the Elgato Marketplace. Plugin ID: `dev.aryapaw.quickbi
 | Spotify: Previous / Next | Skip via Windows media session |
 | Spotify: Like | Liked Songs (Web API) |
 | Spotify: Playlist Like | Heart for a playlist you pick in settings |
+| Delete last recording | Short press: newest recent clip to Recycle Bin. Hold: restore it |
 
 Playback does **not** need the Web API. Like and Playlist Like do.
 
