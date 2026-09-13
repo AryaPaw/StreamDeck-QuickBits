@@ -6,7 +6,8 @@
         "build:plugin": "rollup -c",
         "link:deck": "powershell -ExecutionPolicy Bypass -File scripts/switch-streamdeck-link.ps1 -Build -Restart",
         "link:deck:only": "powershell -ExecutionPolicy Bypass -File scripts/switch-streamdeck-link.ps1",
-        "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart dev.aryapaw.quickbits\""
+        "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart dev.aryapaw.quickbits\"",
+        "test": "bun test"
     },
     "type": "module",
     "devDependencies": {

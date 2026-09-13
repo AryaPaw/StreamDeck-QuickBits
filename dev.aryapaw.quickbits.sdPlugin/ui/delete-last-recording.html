@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8" />
+	<title>Delete last recording</title>
+	<script src="sdpi-components.js"></script>
+	<style>
+		.hint {
+			padding: 8px 12px;
+			font-size: 12px;
+			line-height: 1.45;
+			color: #ccc;
+		}
+	</style>
+</head>
+<body>
+	<sdpi-wrapper>
+		<div class="hint">
+			Sends the newest video in this folder to the Recycle Bin (short press). Hold the key to restore that last deleted file from the Recycle Bin. Age is last write time (OBS finish), not recording start.
+		</div>
+		<sdpi-item label="Folder">
+			<sdpi-textfield setting="folderPath" placeholder="D:\Media\Videos"></sdpi-textfield>
+		</sdpi-item>
+		<sdpi-item label="Max age (sec)">
+			<sdpi-textfield setting="maxAgeSeconds" type="number" default="5" placeholder="5"></sdpi-textfield>
+		</sdpi-item>
+	</sdpi-wrapper>
+</body>
+</html>

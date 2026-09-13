@@ -14,7 +14,10 @@ function getHelperPath(): string {
 	return join(currentDir, "..", "helper", HELPER_NAME);
 }
 
-export async function runHelper(args: string[]): Promise<{ success: boolean; output: string }> {
+export async function runHelper(
+	args: string[],
+	timeoutMs = 10_000
+): Promise<{ success: boolean; output: string }> {
 	const helperPath = getHelperPath();
 
 	if (!existsSync(helperPath)) {
@@ -25,7 +28,7 @@ export async function runHelper(args: string[]): Promise<{ success: boolean; out
 
 	try {
 		const { stdout, stderr } = await execFileAsync(helperPath, args, {
-			timeout: 10000,
+			timeout: timeoutMs,
 			windowsHide: true
 		});
 
@@ -33,9 +36,13 @@ export async function runHelper(args: string[]): Promise<{ success: boolean; out
 		streamDeck.logger.debug(`Helper executed: ${args.join(" ")} -> ${output}`);
 		return { success: true, output };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		streamDeck.logger.error(`Helper error: ${message}`);
-		return { success: false, output: message };
+		const execErr = err as { message?: string; stdout?: string; stderr?: string };
+		const output = [execErr.stdout, execErr.stderr, execErr.message]
+			.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+			.map((part) => part.trim())
+			.join(" | ");
+		streamDeck.logger.error(`Helper error: ${output || String(err)}`);
+		return { success: false, output: output || String(err) };
 	}
 }
 
@@ -47,4 +54,27 @@ export async function setVolume(percent: number): Promise<boolean> {
 export async function toggleDnd(): Promise<boolean> {
 	const result = await runHelper(["toggle-dnd"]);
 	return result.success;
+}
+
+export async function recycleFileToBin(
+	filePath: string,
+	folderPath: string,
+	maxAgeSeconds: number
+): Promise<{ success: boolean; output: string }> {
+	return runHelper([
+		"recycle-file",
+		"--path",
+		filePath,
+		"--folder",
+		folderPath,
+		"--max-age-seconds",
+		String(maxAgeSeconds)
+	]);
+}
+
+export async function restoreFileFromBin(
+	filePath: string,
+	folderPath: string
+): Promise<{ success: boolean; output: string }> {
+	return runHelper(["restore-file", "--path", filePath, "--folder", folderPath], 20_000);
 }

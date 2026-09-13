@@ -10,6 +10,7 @@ import { SpotifyPreviousAction } from "./actions/spotify-previous";
 import { SpotifyNextAction } from "./actions/spotify-next";
 import { SpotifyLikeAction } from "./actions/spotify-like";
 import { SpotifyAddToPlaylistAction } from "./actions/spotify-add-to-playlist";
+import { DeleteLastRecordingAction } from "./actions/delete-last-recording";
 import { loadSpotifySettings, spotifyWebServer, spotifyApiMetrics } from "./shared/spotify";
 import { spotifyRateLimit } from "./shared/spotify/rate-limit";
 
@@ -23,6 +24,7 @@ streamDeck.actions.registerAction(new SpotifyPreviousAction());
 streamDeck.actions.registerAction(new SpotifyNextAction());
 streamDeck.actions.registerAction(new SpotifyLikeAction());
 streamDeck.actions.registerAction(new SpotifyAddToPlaylistAction());
+streamDeck.actions.registerAction(new DeleteLastRecordingAction());
 
 // Load Spotify settings after connect
 streamDeck.connect().then(async () => {

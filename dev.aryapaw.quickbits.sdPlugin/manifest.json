@@ -1,6 +1,6 @@
 {
 	"Name": "QuickBits",
-	"Version": "0.1.0.60",
+	"Version": "0.1.0.69",
 	"Author": "AryaPaw",
 	"Actions": [
 		{
@@ -88,6 +88,22 @@
 					"TitleAlignment": "bottom",
 					"FontSize": 10,
 					"ShowTitle": false
+				}
+			]
+		},
+		{
+			"Name": "Delete last recording",
+			"UUID": "dev.aryapaw.quickbits.delete-last-recording",
+			"Icon": "imgs/actions/delete-last-recording/icon",
+			"Tooltip": "Short press: newest recent video to Recycle Bin. Hold: restore that file",
+			"PropertyInspectorPath": "ui/delete-last-recording.html",
+			"Controllers": ["Keypad"],
+			"States": [
+				{
+					"Image": "imgs/actions/delete-last-recording/key",
+					"Title": "Last clip",
+					"TitleAlignment": "bottom",
+					"FontSize": 10
 				}
 			]
 		}

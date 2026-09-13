@@ -20,6 +20,8 @@ internal static class Program
             Console.Error.WriteLine("  media-previous");
             Console.Error.WriteLine("  media-info [--source <name>]");
             Console.Error.WriteLine("  media-like");
+            Console.Error.WriteLine("  recycle-file --path <file> --folder <dir> --max-age-seconds <n>");
+            Console.Error.WriteLine("  restore-file --path <file> --folder <dir>");
             Console.Error.WriteLine("  spotify-daemon [--filter <name>] [--plugin-dir <path>]");
             return 1;
         }
@@ -37,6 +39,8 @@ internal static class Program
                 "media-previous" => HandleMediaPrevious(),
                 "media-info" => await HandleMediaInfo(args),
                 "media-like" => HandleMediaLike(),
+                "recycle-file" => HandleRecycleFile(args),
+                "restore-file" => HandleRestoreFile(args),
                 "spotify-daemon" => await HandleSpotifyDaemon(args),
                 _ => UnknownCommand(command)
             };
@@ -164,6 +168,59 @@ internal static class Program
     {
         Console.Error.WriteLine($"Unknown command: {command}");
         return 1;
+    }
+
+    static int HandleRecycleFile(string[] args)
+    {
+        string? filePath = null;
+        string? folderPath = null;
+        var maxAgeSeconds = 5;
+
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] == "--path" && i + 1 < args.Length)
+            {
+                filePath = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "--folder" && i + 1 < args.Length)
+            {
+                folderPath = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "--max-age-seconds" && i + 1 < args.Length)
+            {
+                if (int.TryParse(args[i + 1], out var parsed))
+                {
+                    maxAgeSeconds = parsed;
+                }
+                i++;
+            }
+        }
+
+        return RecycleBin.RecycleVideoFile(filePath, folderPath, maxAgeSeconds);
+    }
+
+    static int HandleRestoreFile(string[] args)
+    {
+        string? filePath = null;
+        string? folderPath = null;
+
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (args[i] == "--path" && i + 1 < args.Length)
+            {
+                filePath = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "--folder" && i + 1 < args.Length)
+            {
+                folderPath = args[i + 1];
+                i++;
+            }
+        }
+
+        return RecycleBin.RestoreVideoFile(filePath, folderPath);
     }
 }
 
