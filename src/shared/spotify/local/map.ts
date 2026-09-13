@@ -62,8 +62,11 @@ export type PlayerTrackMetadata = {
 };
 
 export function metadataMatchesPlayer(track: SpotifyTrack, player: PlayerTrackMetadata): boolean {
+	if (isSameTrackTitle(track.name, player.name)) {
+		return true;
+	}
+
 	const titleMatch =
-		isSameTrackTitle(track.name, player.name) ||
 		normalizeTrackTitle(track.name).includes(normalizeTrackTitle(player.name)) ||
 		normalizeTrackTitle(player.name).includes(normalizeTrackTitle(track.name));
 

@@ -190,7 +190,17 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			if (trackChanged) {
 				const entry = this.visible.get(contextId);
 				if (entry) {
-					entry.known = false;
+					const playlistId = entry.settings.playlistId?.trim();
+					const peek =
+						state.track && playlistId
+							? spotifyAPI.peekTrackInPlaylist(playlistId, state.track)
+							: null;
+					if (peek !== null) {
+						entry.inPlaylist = peek;
+						entry.known = true;
+					} else {
+						entry.known = false;
+					}
 				}
 			}
 			await this.renderKey(contextId);

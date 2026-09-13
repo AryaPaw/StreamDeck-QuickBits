@@ -187,19 +187,6 @@ class SpotifyApiGateway {
 		const reason = options.reason ?? "unknown";
 		const dedupeKey = `${method}:${url}`;
 
-		const existing = this.inflight.get(dedupeKey);
-		if (existing) {
-			spotifyApiMetrics.record({
-				kind: "cache_hit",
-				bucket,
-				method,
-				endpoint,
-				reason: "dedupe-inflight",
-				track: options.track
-			});
-			return existing;
-		}
-
 		this.clearLastError();
 
 		const blockReason = this.shouldBlockProactive(options);
@@ -219,6 +206,22 @@ class SpotifyApiGateway {
 			return null;
 		}
 
+		if (method === "GET") {
+			const existing = this.inflight.get(dedupeKey);
+			if (existing) {
+				spotifyApiMetrics.record({
+					kind: "cache_hit",
+					bucket,
+					method,
+					endpoint,
+					reason: "dedupe-inflight",
+					track: options.track
+				});
+				const shared = await existing;
+				return shared ? shared.clone() : null;
+			}
+		}
+
 		const promise = this.executeRequest(settings, url, {
 			...options,
 			method,
@@ -226,11 +229,14 @@ class SpotifyApiGateway {
 			bucket,
 			endpoint
 		});
-		this.inflight.set(dedupeKey, promise);
+		if (method === "GET") {
+			this.inflight.set(dedupeKey, promise);
+		}
 		try {
-			return await promise;
+			const shared = await promise;
+			return shared ? shared.clone() : null;
 		} finally {
-			if (this.inflight.get(dedupeKey) === promise) {
+			if (method === "GET" && this.inflight.get(dedupeKey) === promise) {
 				this.inflight.delete(dedupeKey);
 			}
 		}

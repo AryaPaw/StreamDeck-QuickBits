@@ -73,6 +73,7 @@ class SpotifyState {
 	private likeRecoveryAttempt = 0;
 	private likeCacheHydrated = false;
 	private likeSkipUntil = 0;
+	private likeSkipTrackId: string | null = null;
 	private playingOptimisticUntil = 0;
 	private localStateChain: Promise<void> = Promise.resolve();
 
@@ -211,9 +212,8 @@ class SpotifyState {
 				return byUri;
 			}
 		}
-		// Do not trust trackId-only liked cache without a matching URI entry -
-		// it can stay green after liking a wrong duplicate URI
-		return null;
+		// GSMTC id is known before Web API URI - use it only to paint the key until contains returns
+		return this.likedResultCache.get(track.id) ?? null;
 	}
 
 	private applyCachedLikeIfAny(track: SpotifyTrack): boolean {
@@ -609,7 +609,7 @@ class SpotifyState {
 			return;
 		}
 
-		if (Date.now() < this.likeSkipUntil) {
+		if (Date.now() < this.likeSkipUntil && this.likeSkipTrackId === track.id) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:toggle-cooldown`, "/me/library/contains", "library", trackCtx);
 			streamDeck.logger.debug(`[Spotify] Like check skipped (${reason}): recent toggle`);
 			return;
@@ -670,15 +670,29 @@ class SpotifyState {
 
 		if (isLiked === null) {
 			const lastError = spotifyApiGateway.getLastError();
+			const apiFailed =
+				lastError === "geo_blocked" ||
+				lastError === "no access token" ||
+				spotifyRateLimit.shouldThrottle();
 			const fetchStatus: SpotifyLikeApiStatus =
 				lastError === "geo_blocked"
 					? "geo_blocked"
 					: spotifyRateLimit.shouldThrottle()
 						? "rate_limited"
-						: "unavailable";
+						: lastError
+							? "unavailable"
+							: "ok";
+
+			if (!apiFailed) {
+				streamDeck.logger.info(
+					`[Spotify] Like check (${reason}): unresolved URI for "${track.name}" by "${track.artist}" - keeping empty heart`
+				);
+				this.scheduleLikeRetry(track, reason);
+				return;
+			}
+
 			const displayStatus = this.resolveDisplayApiStatus(track, fetchStatus);
 
-			// Soft-display last known like during geo/VPN blocks so the key is not stuck on !
 			if (fetchStatus === "geo_blocked") {
 				const soft = this.getCachedLike(trackId) ?? this.getCachedLikeForTrack(track) ?? cached;
 				if (soft) {
@@ -695,7 +709,6 @@ class SpotifyState {
 				} else {
 					this.updateLikeApiStatus("geo_blocked");
 				}
-				// No short retry - geo clears slowly
 				this.scheduleDegradedRecovery(track);
 				return;
 			}
@@ -798,6 +811,7 @@ class SpotifyState {
 		if (!this.currentState.track) return;
 		if (this.currentState.isLiked === isLiked) return;
 		this.likeSkipUntil = Date.now() + LIKE_SKIP_AFTER_TOGGLE_MS;
+		this.likeSkipTrackId = this.currentState.track.id;
 		this.rememberLiked(this.currentState.track.id, isLiked);
 		this.currentState = {
 			...this.currentState,
