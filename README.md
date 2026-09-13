@@ -2,7 +2,7 @@
 
 [![Windows](https://img.shields.io/badge/Windows-10%2B-0078D6?logo=windows&logoColor=white)](#requirements)
 [![Stream Deck](https://img.shields.io/badge/Stream%20Deck-6.9%2B-111111)](#requirements)
-[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 
 Personal [Stream Deck](https://www.elgato.com/stream-deck) plugin for **Windows**: volume, Do Not Disturb, optional [Skydimo](https://www.skydimo.com/) lighting, and Spotify.
 
@@ -140,4 +140,6 @@ Bump the patch in `manifest.json` (`0.1.0.N`) when behaviour changes.
 
 ## License
 
-[MIT](LICENSE)
+Copyright (C) 2026 AryaPaw
+
+This program is free software: you can redistribute it and/or modify it under the terms of the [GNU General Public License](LICENSE), version 3.
