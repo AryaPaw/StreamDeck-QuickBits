@@ -107,7 +107,7 @@ The sample Static color is `#fff3c7` at brightness 80; change it in the Rule Edi
 ### Button
 
 - Short tap: Sync ↔ Static (from Off, next tap is Static).
-- Long press (~650 ms): Off.
+- Long press (~350 ms): Off.
 - Icon = last trigger the plugin fired, not live Skydimo state.
 
 If Skydimo is at `C:\Program Files\Skydimo\Skydimo.exe`, the plugin waits for it on startup (up to 3 minutes) and fires Static once.

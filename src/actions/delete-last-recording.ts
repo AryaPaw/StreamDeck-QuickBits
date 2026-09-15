@@ -24,7 +24,7 @@ const OK_IMAGE = "imgs/actions/delete-last-recording/ok";
 const FAIL_IMAGE = "imgs/actions/delete-last-recording/fail";
 const IDLE_TITLE = "Last clip";
 const STATUS_RESET_MS = 2800;
-const LONG_PRESS_MS = 650;
+const LONG_PRESS_MS = 350;
 
 @action({ UUID: "dev.aryapaw.quickbits.delete-last-recording" })
 export class DeleteLastRecordingAction extends SingletonAction<DeleteLastRecordingSettings> {

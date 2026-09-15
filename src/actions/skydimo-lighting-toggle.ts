@@ -34,7 +34,7 @@ const SKYDIMO_KEY_IMAGE_OFF = "imgs/actions/marker-skydimo-screen-sync/off";
 export class SkydimoLightingToggleAction extends SingletonAction<SkydimoLightingToggleSettings> {
 	private readonly keyPressGuard = new KeyPressGuard();
 	/** Hold at least this long to fire the Lighting Off trigger exe. */
-	private readonly longPressMs = 650;
+	private readonly longPressMs = 350;
 	private readonly keySessions = new Map<
 		string,
 		{
