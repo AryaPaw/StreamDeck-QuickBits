@@ -108,25 +108,16 @@
 			text-decoration: underline;
 		}
 
-		.steps code {
-			background: #1c1c1c;
-			border: 1px solid #2a2a2a;
-			border-radius: 4px;
-			padding: 2px 6px;
-			font-size: 12px;
-			font-family: 'SF Mono', Consolas, monospace;
-			color: #e0e0e0;
-			cursor: pointer;
-			transition: border-color 0.15s;
-		}
-
-		.steps code:hover {
-			border-color: #1DB954;
-		}
-
 		.steps b {
 			color: #e0e0e0;
 			font-weight: 500;
+		}
+
+		.steps .copy-wrap {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			vertical-align: middle;
 		}
 
 		.steps .copyable {
@@ -138,8 +129,62 @@
 			transition: border-color 0.15s;
 		}
 
+		.steps code.copyable {
+			font-size: 12px;
+			font-family: 'SF Mono', Consolas, monospace;
+			color: #e0e0e0;
+		}
+
 		.steps .copyable:hover {
 			border-color: #1DB954;
+		}
+
+		.steps .copy-wrap.is-copied .copyable {
+			border-color: #1DB954;
+		}
+
+		.steps .copy-feedback {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			font-size: 12px;
+			font-weight: 500;
+			letter-spacing: 0.01em;
+			color: #1DB954;
+			opacity: 0;
+			transform: translateX(-6px);
+			transition: opacity 0.2s ease, transform 0.2s ease;
+			pointer-events: none;
+			white-space: nowrap;
+		}
+
+		.steps .copy-feedback::before {
+			content: "";
+			width: 0;
+			height: 13px;
+			flex-shrink: 0;
+			opacity: 0;
+			background-color: #1DB954;
+			-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L19 7'/%3E%3C/svg%3E") center / contain no-repeat;
+			mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L19 7'/%3E%3C/svg%3E") center / contain no-repeat;
+			transition: width 0.2s ease, opacity 0.2s ease;
+		}
+
+		.steps .copy-wrap.is-copied .copy-feedback {
+			opacity: 1;
+			transform: none;
+		}
+
+		.steps .copy-wrap.is-copied .copy-feedback::before {
+			width: 13px;
+			opacity: 1;
+		}
+
+		@media (prefers-reduced-motion: reduce) {
+			.steps .copy-feedback,
+			.steps .copy-feedback::before {
+				transition: none;
+			}
 		}
 
 		form {
@@ -301,8 +346,8 @@
 			<div class="steps">
 				<ol>
 					<li>Open <a href="https://developer.spotify.com/dashboard" target="_blank">Spotify Developer Dashboard</a></li>
-					<li><a href="https://developer.spotify.com/dashboard/create" target="_blank">Create a new app</a> named <b id="app-name-hint" class="copyable">StreamDeck QuickBits</b></li>
-					<li>Set Redirect URI to <code id="redirect-uri">http://127.0.0.1:5789/callback</code></li>
+					<li><a href="https://developer.spotify.com/dashboard/create" target="_blank">Create a new app</a> named <span class="copy-wrap"><b id="app-name-hint" class="copyable" role="button" tabindex="0">StreamDeck QuickBits</b><span class="copy-feedback" aria-live="polite"></span></span></li>
+					<li>Set Redirect URI to <span class="copy-wrap"><code id="redirect-uri" class="copyable" role="button" tabindex="0">http://127.0.0.1:5789/callback</code><span class="copy-feedback" aria-live="polite"></span></span></li>
 					<li>Select <b>Web API</b> in "APIs used"</li>
 					<li>Save the app and open <b>Settings</b></li>
 					<li>Copy <b>Client ID</b> and <b>Client Secret</b> below</li>
@@ -359,19 +404,67 @@
 
 		loadSavedSettings();
 
-		// Copy redirect URI on click
-		document.getElementById('redirect-uri').addEventListener('click', function() {
-			navigator.clipboard.writeText(this.textContent);
-			this.style.borderColor = '#1DB954';
-			setTimeout(() => this.style.borderColor = '', 1000);
-		});
+		function bindCopyChip(el) {
+			const wrap = el.closest('.copy-wrap');
+			const feedback = wrap ? wrap.querySelector('.copy-feedback') : null;
 
-		// Copy app name on click
-		appNameHint.addEventListener('click', function() {
-			navigator.clipboard.writeText(this.textContent);
-			this.style.borderColor = '#1DB954';
-			setTimeout(() => this.style.borderColor = '', 1000);
-		});
+			const copyValue = async (value) => {
+				try {
+					await navigator.clipboard.writeText(value);
+					return true;
+				} catch {
+					try {
+						const input = document.createElement('textarea');
+						input.value = value;
+						input.setAttribute('readonly', '');
+						input.style.position = 'fixed';
+						input.style.left = '-9999px';
+						document.body.appendChild(input);
+						input.select();
+						const ok = document.execCommand('copy');
+						input.remove();
+						return ok;
+					} catch {
+						return false;
+					}
+				}
+			};
+
+			const showCopied = () => {
+				if (!wrap) {
+					return;
+				}
+				if (feedback) {
+					feedback.textContent = 'Copied';
+				}
+				wrap.classList.add('is-copied');
+				clearTimeout(el._copyTimer);
+				el._copyTimer = setTimeout(() => {
+					wrap.classList.remove('is-copied');
+					if (feedback) {
+						feedback.textContent = '';
+					}
+				}, 3000);
+			};
+
+			el.addEventListener('click', async () => {
+				const value = (el.textContent || '').trim();
+				if (await copyValue(value)) {
+					showCopied();
+				}
+			});
+
+			el.addEventListener('keydown', (event) => {
+				if (event.key !== 'Enter' && event.key !== ' ') {
+					return;
+				}
+				event.preventDefault();
+				el.click();
+			});
+		}
+
+		bindCopyChip(document.getElementById('redirect-uri'));
+		bindCopyChip(appNameHint);
 
 		function showMessage(type, text) {
 			message.className = 'message ' + type;
