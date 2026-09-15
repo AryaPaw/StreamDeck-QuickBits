@@ -51,7 +51,8 @@ class SpotifyState {
 		playbackState: "unknown",
 		isLiked: false,
 		likeApiStatus: "ok",
-		likeKnown: false
+		likeKnown: false,
+		likePending: null
 	};
 	private lastTrackId: string | null = null;
 	private lastTrackAt = 0;
@@ -293,6 +294,7 @@ class SpotifyState {
 		let isLiked = this.currentState.isLiked;
 		let likeKnown = this.currentState.likeKnown;
 		let likeApiStatus = this.currentState.likeApiStatus;
+		let likePending = this.currentState.likePending;
 		let trackChanged = false;
 
 		if (!track) {
@@ -302,6 +304,7 @@ class SpotifyState {
 				this.lastTrackId = null;
 				isLiked = false;
 				likeKnown = false;
+				likePending = null;
 			}
 		} else {
 			track = this.applyPlayingGrace(track, local);
@@ -323,6 +326,7 @@ class SpotifyState {
 				// Cold start (null -> track) is not a skip - do not force cache-grace API burn
 				this.lastTrackChangeWasSwitch = previousTrackId !== null;
 				trackChanged = true;
+				likePending = null;
 				this.pausedSince = 0;
 				this.likeRetryCount = 0;
 				this.likeRetryTrackId = track.id;
@@ -361,7 +365,8 @@ class SpotifyState {
 		const likedChanged =
 			this.currentState.isLiked !== isLiked ||
 			this.currentState.likeKnown !== likeKnown ||
-			this.currentState.likeApiStatus !== likeApiStatus;
+			this.currentState.likeApiStatus !== likeApiStatus ||
+			this.currentState.likePending !== likePending;
 		const artChanged =
 			this.currentState.track?.albumArtBase64 !== track?.albumArtBase64 ||
 			this.currentState.track?.albumArtPath !== track?.albumArtPath;
@@ -382,7 +387,7 @@ class SpotifyState {
 			metaChanged ||
 			(track === null && hadTrack)
 		) {
-			this.currentState = { ...this.currentState, track, playbackState, isLiked, likeKnown, likeApiStatus };
+			this.currentState = { ...this.currentState, track, playbackState, isLiked, likeKnown, likeApiStatus, likePending };
 			this.emit(this.currentState);
 		}
 
@@ -526,7 +531,18 @@ class SpotifyState {
 		}
 	}
 
+	markLikeUnavailable(): void {
+		this.updateLikeApiStatus("unavailable");
+		const track = this.currentState.track;
+		if (track) {
+			this.scheduleDegradedRecovery(track);
+		}
+	}
+
 	private async enrichIsLiked(track: SpotifyTrack, reason: string): Promise<void> {
+		if (this.currentState.likePending) {
+			return;
+		}
 		const trackId = track.id;
 		const trackCtx = { title: track.name, artist: track.artist };
 
@@ -664,24 +680,23 @@ class SpotifyState {
 		const bypassQuota = BYPASS_DAILY_BUDGET_REASONS.has(reason);
 		const isLiked = await this.fetchIsLiked(track, reason, bypassQuota);
 		const resolvedUri = spotifyAPI.getCachedUri(trackId) ?? "unknown";
-		if (trackId !== this.lastTrackId || !this.currentState.track) {
+		if (trackId !== this.lastTrackId || !this.currentState.track || this.currentState.likePending) {
 			return;
 		}
 
 		if (isLiked === null) {
 			const lastError = spotifyApiGateway.getLastError();
-			const apiFailed =
-				lastError === "geo_blocked" ||
-				lastError === "no access token" ||
-				spotifyRateLimit.shouldThrottle();
+			const apiFailed = Boolean(lastError) || spotifyRateLimit.shouldThrottle();
 			const fetchStatus: SpotifyLikeApiStatus =
 				lastError === "geo_blocked"
 					? "geo_blocked"
-					: spotifyRateLimit.shouldThrottle()
-						? "rate_limited"
-						: lastError
-							? "unavailable"
-							: "ok";
+					: lastError === "no access token"
+						? "unavailable"
+						: spotifyRateLimit.shouldThrottle()
+							? "rate_limited"
+							: lastError
+								? "unavailable"
+								: "ok";
 
 			if (!apiFailed) {
 				streamDeck.logger.info(
@@ -807,9 +822,35 @@ class SpotifyState {
 		this.emit(this.currentState);
 	}
 
-	setLikedOptimistic(isLiked: boolean): void {
-		if (!this.currentState.track) return;
-		if (this.currentState.isLiked === isLiked) return;
+	beginLikeToggle(liked: boolean): void {
+		if (!this.currentState.track) {
+			return;
+		}
+		this.likeSkipUntil = Date.now() + LIKE_SKIP_AFTER_TOGGLE_MS;
+		this.likeSkipTrackId = this.currentState.track.id;
+		this.currentState = {
+			...this.currentState,
+			likePending: liked ? "like" : "unlike",
+			likeApiStatus: "ok"
+		};
+		this.emit(this.currentState);
+	}
+
+	cancelLikeToggle(): void {
+		if (!this.currentState.likePending) {
+			return;
+		}
+		this.currentState = {
+			...this.currentState,
+			likePending: null
+		};
+		this.emit(this.currentState);
+	}
+
+	confirmLike(isLiked: boolean): void {
+		if (!this.currentState.track) {
+			return;
+		}
 		this.likeSkipUntil = Date.now() + LIKE_SKIP_AFTER_TOGGLE_MS;
 		this.likeSkipTrackId = this.currentState.track.id;
 		this.rememberLiked(this.currentState.track.id, isLiked);
@@ -817,6 +858,7 @@ class SpotifyState {
 			...this.currentState,
 			isLiked,
 			likeKnown: true,
+			likePending: null,
 			likeApiStatus: "ok"
 		};
 		this.emit(this.currentState);

@@ -38,12 +38,15 @@ export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavaila
 
 export type PlaybackStateName = "playing" | "paused" | "stopped" | "unknown";
 
+export type SpotifyLikePending = "like" | "unlike" | null;
+
 export type SpotifyPlaybackState = {
 	track: SpotifyTrack | null;
 	playbackState: PlaybackStateName;
 	isLiked: boolean;
 	likeApiStatus: SpotifyLikeApiStatus;
 	likeKnown: boolean;
+	likePending: SpotifyLikePending;
 };
 
 export type SpotifyPlayingItem = {

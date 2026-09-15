@@ -157,7 +157,13 @@ class SpotifyAuth {
 				})
 			});
 
-			if (!response.ok) return false;
+			if (!response.ok) {
+				const errorText = await response.text().catch(() => "");
+				streamDeck.logger.error(
+					`[Spotify] Token refresh failed: ${response.status} ${errorText.slice(0, 180)}`
+				);
+				return false;
+			}
 
 			const data = await response.json() as {
 				access_token: string;
@@ -176,7 +182,9 @@ class SpotifyAuth {
 			}
 			await saveSpotifySettings(settings);
 			return true;
-		} catch {
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			streamDeck.logger.error(`[Spotify] Token refresh failed: ${msg}`);
 			return false;
 		}
 	}

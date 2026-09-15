@@ -35,6 +35,7 @@ type VisibleKey = {
 	settings: SpotifyAddToPlaylistSettings;
 	inPlaylist: boolean;
 	known: boolean;
+	pending: boolean;
 	renderSerial: number;
 };
 
@@ -52,6 +53,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			settings: ev.payload.settings,
 			inPlaylist: false,
 			known: false,
+			pending: false,
 			renderSerial: 0
 		});
 		if (!this.unsubscribe) {
@@ -97,6 +99,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			entry.settings = resolved;
 			entry.known = false;
 			entry.inPlaylist = false;
+			entry.pending = false;
 		}
 
 		await this.renderKey(ev.action.id);
@@ -149,8 +152,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			const entry = this.visible.get(ev.action.id);
 			const previous = entry?.inPlaylist ?? false;
 			if (entry) {
-				entry.inPlaylist = !previous;
-				entry.known = true;
+				entry.pending = true;
 			}
 			await this.renderKey(ev.action.id);
 
@@ -160,6 +162,9 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 				playlistId,
 				playlistName
 			);
+			if (entry) {
+				entry.pending = false;
+			}
 			if (!result.ok) {
 				if (entry) {
 					entry.inPlaylist = previous;
@@ -190,6 +195,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			if (trackChanged) {
 				const entry = this.visible.get(contextId);
 				if (entry) {
+					entry.pending = false;
 					const playlistId = entry.settings.playlistId?.trim();
 					const peek =
 						state.track && playlistId
@@ -212,7 +218,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 
 	private async refreshMembership(contextId: string): Promise<void> {
 		const entry = this.visible.get(contextId);
-		if (!entry) {
+		if (!entry || entry.pending) {
 			return;
 		}
 		const playlistId = entry.settings.playlistId?.trim();
@@ -241,12 +247,16 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 		if (!this.visible.has(contextId)) {
 			return;
 		}
+		const latest = this.visible.get(contextId);
+		if (!latest || latest.pending) {
+			return;
+		}
 		if (inPlaylist === null) {
 			await this.renderKey(contextId);
 			return;
 		}
-		entry.inPlaylist = inPlaylist;
-		entry.known = true;
+		latest.inPlaylist = inPlaylist;
+		latest.known = true;
 		await this.renderKey(contextId);
 	}
 
@@ -306,8 +316,16 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 		const unavailable =
 			!settings.refreshToken ||
 			state.likeApiStatus === "no_auth" ||
-			state.likeApiStatus === "geo_blocked";
-		const visual = unavailable ? "unavailable" : entry.inPlaylist && playlistId ? "liked" : "empty";
+			state.likeApiStatus === "geo_blocked" ||
+			(!entry.known &&
+				(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited"));
+		const visual = unavailable
+			? "unavailable"
+			: entry.pending
+				? "pending"
+				: entry.inPlaylist && playlistId
+					? "liked"
+					: "empty";
 
 		await entry.action.setImage(buildPlaylistLikeKeyImage(title, visual));
 	}

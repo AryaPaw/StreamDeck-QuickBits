@@ -16,6 +16,7 @@ import { spotifyApiGateway } from "../shared/spotify/api-gateway";
 
 const LIKE_IMAGE = "imgs/actions/spotify/like";
 const LIKED_IMAGE = "imgs/actions/spotify/liked";
+const LIKE_PENDING_IMAGE = "imgs/actions/spotify/like-pending";
 const LIKE_API_UNAVAILABLE_IMAGE = "imgs/actions/spotify/like-api-unavailable";
 
 @action({ UUID: "dev.aryapaw.quickbits.spotify-like" })
@@ -57,23 +58,29 @@ export class SpotifyLikeAction extends SingletonAction {
 			}
 
 			const newLiked = !isLiked;
-			spotifyState.setLikedOptimistic(newLiked);
+			spotifyState.beginLikeToggle(newLiked);
 
 			const success = await spotifyAPI.setLike(settings, track, newLiked);
+			const stillSameTrack = spotifyState.getState().track?.id === track.id;
 			if (!success) {
-				spotifyState.setLikedOptimistic(isLiked);
-				if (spotifyApiGateway.getLastError() === "geo_blocked") {
-					spotifyState.markGeoBlocked();
-					streamDeck.logger.warn(
-						`[Spotify] Like blocked by geo/VPN - fix network exit country, then retry`
-					);
-				} else {
-					spotifyState.refreshLikeApiStatus();
+				if (stillSameTrack) {
+					spotifyState.cancelLikeToggle();
+					if (spotifyApiGateway.getLastError() === "geo_blocked") {
+						spotifyState.markGeoBlocked();
+						streamDeck.logger.warn(
+							`[Spotify] Like blocked by geo/VPN - fix network exit country, then retry`
+						);
+					} else {
+						spotifyState.markLikeUnavailable();
+					}
 				}
 				await ev.action.showAlert();
 				return;
 			}
 
+			if (stillSameTrack) {
+				spotifyState.confirmLike(newLiked);
+			}
 			await this.renderLikeKey(spotifyState.getState());
 		});
 	}
@@ -97,9 +104,15 @@ export class SpotifyLikeAction extends SingletonAction {
 			state.likeApiStatus === "no_auth" ||
 			state.likeApiStatus === "geo_blocked" ||
 			(!state.likeKnown &&
+				!state.likePending &&
 				(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited"))
 		) {
 			await this.currentAction.setImage(LIKE_API_UNAVAILABLE_IMAGE);
+			return;
+		}
+
+		if (state.likePending) {
+			await this.currentAction.setImage(LIKE_PENDING_IMAGE);
 			return;
 		}
 

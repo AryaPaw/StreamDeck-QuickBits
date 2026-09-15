@@ -1424,9 +1424,16 @@ export class SpotifyAPI {
 		}
 
 		if (allCandidates.length === 0) {
-			streamDeck.logger.warn(
-				`[Spotify] resolveTrackUri (${reason}): no search match for "${track.name}" by "${track.artist}"`
-			);
+			const lastError = spotifyApiGateway.getLastError();
+			if (lastError) {
+				streamDeck.logger.warn(
+					`[Spotify] resolveTrackUri (${reason}): search failed (${lastError}) for "${track.name}" by "${track.artist}"`
+				);
+			} else {
+				streamDeck.logger.warn(
+					`[Spotify] resolveTrackUri (${reason}): no search match for "${track.name}" by "${track.artist}"`
+				);
+			}
 			return { uri: null, ambiguous: false };
 		}
 
