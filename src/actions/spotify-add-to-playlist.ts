@@ -192,22 +192,23 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 		const trackChanged = trackId !== this.lastTrackId;
 		this.lastTrackId = trackId;
 		for (const contextId of this.visible.keys()) {
+			const entry = this.visible.get(contextId);
+			if (!entry) {
+				continue;
+			}
 			if (trackChanged) {
-				const entry = this.visible.get(contextId);
-				if (entry) {
-					entry.pending = false;
-					const playlistId = entry.settings.playlistId?.trim();
-					const peek =
-						state.track && playlistId
-							? spotifyAPI.peekTrackInPlaylist(playlistId, state.track)
-							: null;
-					if (peek !== null) {
-						entry.inPlaylist = peek;
-						entry.known = true;
-					} else {
-						entry.known = false;
-					}
-				}
+				entry.pending = false;
+			}
+			const playlistId = entry.settings.playlistId?.trim();
+			const peek =
+				state.track && playlistId
+					? spotifyAPI.peekTrackInPlaylist(playlistId, state.track)
+					: null;
+			if (peek !== null) {
+				entry.inPlaylist = peek;
+				entry.known = true;
+			} else if (trackChanged) {
+				entry.known = false;
 			}
 			await this.renderKey(contextId);
 			if (trackChanged) {

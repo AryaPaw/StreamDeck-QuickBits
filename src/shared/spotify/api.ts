@@ -23,6 +23,7 @@ const PLAYER_RETRY_REASONS = new Set([
 	"toggle-like",
 	"track-changed",
 	"playing-changed",
+	"playlist-sync",
 	"recovery"
 ]);
 const PLAYLIST_FETCH_FAIL_COOLDOWN_MS = 60_000;
@@ -106,6 +107,17 @@ export class SpotifyAPI {
 
 	private rememberUri(trackId: string, uri: string, fromPlayer = false): string | undefined {
 		const previous = this.uriCache.get(trackId);
+		if (
+			!fromPlayer &&
+			this.playerConfirmedTrackIds.has(trackId) &&
+			previous &&
+			previous !== uri
+		) {
+			streamDeck.logger.info(
+				`[Spotify] keeping player URI ${previous}, ignoring search ${uri}`
+			);
+			return undefined;
+		}
 		this.uriCache.set(trackId, uri);
 		this.persistUriCache();
 		if (previous && previous !== uri) {
@@ -114,7 +126,6 @@ export class SpotifyAPI {
 		if (fromPlayer) {
 			this.playerConfirmedTrackIds.add(trackId);
 		} else if (previous !== uri) {
-			// Search/cache URI is not trusted for cache-hit until player confirms
 			this.playerConfirmedTrackIds.delete(trackId);
 		}
 		return previous !== uri ? previous : undefined;
@@ -1484,6 +1495,11 @@ export class SpotifyAPI {
 			return playerTrack.uri;
 		}
 
+		if (this.isPlayerConfirmed(track.id) && previousUri) {
+			this.lastResolveSource = "player";
+			return previousUri;
+		}
+
 		const search = await this.searchResolveTrackUri(settings, track, reason, shouldBypassQuota);
 		if (search.ambiguous) {
 			const fallback = previousUri ?? search.fallbackUri ?? null;
@@ -1508,6 +1524,10 @@ export class SpotifyAPI {
 			return null;
 		}
 		if (search.uri) {
+			if (this.isPlayerConfirmed(track.id) && previousUri) {
+				this.lastResolveSource = "player";
+				return previousUri;
+			}
 			const replaced = this.rememberUri(track.id, search.uri, false);
 			if (replaced && replaced !== search.uri) {
 				streamDeck.logger.info(
