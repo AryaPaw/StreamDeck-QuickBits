@@ -20,3 +20,8 @@ export { spotifyApiGateway } from "./api-gateway";
 export { spotifyApiMetrics } from "./api-metrics";
 export { spotifyState } from "./state";
 export { spotifyLocalClient } from "./local/client";
+export {
+	classifyGatewayFailure,
+	likeApiStatusToBadge,
+	probeLikeApiStatus
+} from "./like-error";

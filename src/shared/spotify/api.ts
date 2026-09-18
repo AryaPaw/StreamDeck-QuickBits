@@ -1055,10 +1055,6 @@ export class SpotifyAPI {
 				return null;
 			}
 			const body = await response.text().catch(() => "");
-			if (/unavailable in this country/i.test(body)) {
-				streamDeck.logger.warn(`[Spotify] isSaved geo-blocked: ${body.slice(0, 120)}`);
-				return null;
-			}
 			if (uri.startsWith("spotify:track:")) {
 				streamDeck.logger.warn(
 					`[Spotify] isSaved library 403, trying tracks/contains fallback${body ? `: ${body.slice(0, 200)}` : ""}`

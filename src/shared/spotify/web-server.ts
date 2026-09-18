@@ -10,6 +10,7 @@ import { spotifyAuth, REDIRECT_URI, SCOPES } from "./auth";
 import { loadSpotifySettings, saveSpotifySettings } from "./settings";
 import { spotifyRateLimit } from "./rate-limit";
 import { spotifyState } from "./state";
+import { isGeoBlockedBody } from "./like-error";
 
 type ApiTestStep = {
 	name: string;
@@ -193,7 +194,7 @@ async function runApiConnectivityTest(): Promise<{
 			}
 			if (response.status === 403) {
 				const body = await response.text().catch(() => "");
-				const geo = /unavailable in this country/i.test(body);
+				const geo = isGeoBlockedBody(body) || spotifyApiGateway.getLastError() === "geo_blocked";
 				return {
 					ok: false,
 					status: 403,

@@ -14,6 +14,12 @@ import type {
 	SpotifyTrack,
 	StateListener
 } from "./types";
+import {
+	classifyGatewayFailure,
+	probeLikeApiStatus,
+	resolveDisplayApiStatus,
+	statusAfterSuccessfulLikeCache
+} from "./like-error";
 
 const TRANSITION_HOLD_MS = 2_000;
 const AUTO_ADVANCE_PLAYING_MS = 2_000;
@@ -183,11 +189,7 @@ class SpotifyState {
 	}
 
 	private isLikeStatusDegraded(): boolean {
-		return (
-			this.currentState.likeApiStatus === "unavailable" ||
-			this.currentState.likeApiStatus === "rate_limited" ||
-			this.currentState.likeApiStatus === "geo_blocked"
-		);
+		return this.currentState.likeApiStatus !== "ok";
 	}
 
 	private needsLikeRecovery(): boolean {
@@ -356,7 +358,7 @@ class SpotifyState {
 					track = { ...track, isPlaying: true };
 				}
 
-				likeApiStatus = this.probeLikeApiStatus(track);
+				likeApiStatus = this.computeProbedLikeApiStatus(track);
 			}
 		}
 
@@ -485,28 +487,17 @@ class SpotifyState {
 		}, delay);
 	}
 
-	private probeLikeApiStatus(track: SpotifyTrack | null): SpotifyLikeApiStatus {
-		const settings = getSpotifySettings();
-		if (!settings.refreshToken) {
-			return "no_auth";
-		}
-		if (track && this.getCachedLikeForTrack(track)) {
-			return "ok";
-		}
-		if (spotifyRateLimit.shouldThrottle()) {
-			return "rate_limited";
-		}
-		return "ok";
+	private computeProbedLikeApiStatus(track: SpotifyTrack | null): SpotifyLikeApiStatus {
+		return probeLikeApiStatus({
+			hasRefreshToken: Boolean(getSpotifySettings().refreshToken),
+			hasLikeCache: Boolean(track && this.getCachedLikeForTrack(track)),
+			throttled: spotifyRateLimit.shouldThrottle(),
+			current: this.currentState.likeApiStatus
+		});
 	}
 
-	private resolveDisplayApiStatus(track: SpotifyTrack, fetchStatus: SpotifyLikeApiStatus): SpotifyLikeApiStatus {
-		if (fetchStatus === "no_auth") {
-			return "no_auth";
-		}
-		if (this.getCachedLikeForTrack(track)) {
-			return "ok";
-		}
-		return fetchStatus;
+	private displayApiStatus(track: SpotifyTrack, fetchStatus: SpotifyLikeApiStatus): SpotifyLikeApiStatus {
+		return resolveDisplayApiStatus(fetchStatus, Boolean(this.getCachedLikeForTrack(track)));
 	}
 
 	private updateLikeApiStatus(status: SpotifyLikeApiStatus): void {
@@ -519,20 +510,12 @@ class SpotifyState {
 	}
 
 	refreshLikeApiStatus(): void {
-		this.updateLikeApiStatus(this.probeLikeApiStatus(this.currentState.track));
+		this.updateLikeApiStatus(this.computeProbedLikeApiStatus(this.currentState.track));
 	}
 
-	/** Keep geo status after a failed manual like - probe would wrongly reset to ok */
-	markGeoBlocked(): void {
-		this.updateLikeApiStatus("geo_blocked");
-		const track = this.currentState.track;
-		if (track) {
-			this.scheduleDegradedRecovery(track);
-		}
-	}
-
-	markLikeUnavailable(): void {
-		this.updateLikeApiStatus("unavailable");
+	markLikeApiFailure(status?: SpotifyLikeApiStatus): void {
+		const next = status ?? classifyGatewayFailure(spotifyApiGateway.getLastError());
+		this.updateLikeApiStatus(next);
 		const track = this.currentState.track;
 		if (track) {
 			this.scheduleDegradedRecovery(track);
@@ -589,7 +572,7 @@ class SpotifyState {
 				...this.currentState,
 				isLiked: cached.isLiked,
 				likeKnown: true,
-				likeApiStatus: "ok"
+				likeApiStatus: statusAfterSuccessfulLikeCache(this.currentState.likeApiStatus)
 			};
 			this.emit(this.currentState);
 			this.clearDegradedRecovery();
@@ -614,12 +597,12 @@ class SpotifyState {
 					...this.currentState,
 					isLiked: cachedDaily.isLiked,
 					likeKnown: true,
-					likeApiStatus: "ok"
+					likeApiStatus: statusAfterSuccessfulLikeCache(this.currentState.likeApiStatus)
 				};
 				this.emit(this.currentState);
 				this.clearDegradedRecovery();
 			} else {
-				this.updateLikeApiStatus("unavailable");
+				this.updateLikeApiStatus("daily");
 				this.scheduleDegradedRecovery(track);
 			}
 			return;
@@ -647,7 +630,7 @@ class SpotifyState {
 
 		if (spotifyRateLimit.shouldThrottle()) {
 			spotifyApiMetrics.recordPolicySkip(`${reason}:backoff`, "/me/library/contains", "library", trackCtx);
-			const displayStatus = this.resolveDisplayApiStatus(track, "rate_limited");
+			const displayStatus = this.displayApiStatus(track, "rate_limited");
 			this.updateLikeApiStatus(displayStatus);
 			if (cached) {
 				streamDeck.logger.info(
@@ -671,7 +654,7 @@ class SpotifyState {
 				...this.currentState,
 				isLiked: cached.isLiked,
 				likeKnown: true,
-				likeApiStatus: "ok"
+				likeApiStatus: statusAfterSuccessfulLikeCache(this.currentState.likeApiStatus)
 			};
 			this.emit(this.currentState);
 			this.clearDegradedRecovery();
@@ -687,16 +670,9 @@ class SpotifyState {
 		if (isLiked === null) {
 			const lastError = spotifyApiGateway.getLastError();
 			const apiFailed = Boolean(lastError) || spotifyRateLimit.shouldThrottle();
-			const fetchStatus: SpotifyLikeApiStatus =
-				lastError === "geo_blocked"
-					? "geo_blocked"
-					: lastError === "no access token"
-						? "unavailable"
-						: spotifyRateLimit.shouldThrottle()
-							? "rate_limited"
-							: lastError
-								? "unavailable"
-								: "ok";
+			const fetchStatus = classifyGatewayFailure(
+				lastError ?? (spotifyRateLimit.shouldThrottle() ? "rate_limited" : null)
+			);
 
 			if (!apiFailed) {
 				streamDeck.logger.info(
@@ -706,7 +682,7 @@ class SpotifyState {
 				return;
 			}
 
-			const displayStatus = this.resolveDisplayApiStatus(track, fetchStatus);
+			const displayStatus = this.displayApiStatus(track, fetchStatus);
 
 			if (fetchStatus === "geo_blocked") {
 				const soft = this.getCachedLike(trackId) ?? this.getCachedLikeForTrack(track) ?? cached;

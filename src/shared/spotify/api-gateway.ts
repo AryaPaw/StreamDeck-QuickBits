@@ -4,6 +4,7 @@ import { spotifyApiMetrics, type ApiTrackContext } from "./api-metrics";
 import { SPOTIFY_WEB_API_LIMITS } from "./limits";
 import { spotifyRateLimit } from "./rate-limit";
 import type { SpotifySettings } from "./types";
+import { isGeoBlockedBody, type SpotifyGatewayError } from "./like-error";
 
 export type ApiRequestPriority = "manual" | "normal" | "background";
 
@@ -34,10 +35,6 @@ function endpointLabel(url: string): string {
 
 const REQUEST_TIMEOUT_MS = 12_000;
 
-function isGeoBlockedBody(body: string): boolean {
-	return /unavailable in this country/i.test(body);
-}
-
 function isPlaylistEndpointForbidden(url: string, body: string): boolean {
 	return url.includes("/playlists/") && /"message"\s*:\s*"Forbidden"/i.test(body);
 }
@@ -48,14 +45,14 @@ class SpotifyApiGateway {
 	private dailyRequestCount = 0;
 	private dailyRequestDayKey = "";
 	private dailySoftStopLogged = false;
-	private lastError: string | null = null;
+	private lastError: SpotifyGatewayError | null = null;
 
-	getLastError(): string | null {
+	getLastError(): SpotifyGatewayError | null {
 		return this.lastError;
 	}
 
-	private setLastError(message: string): void {
-		this.lastError = message.includes("fetch failed") ? "fetch failed" : message;
+	private setLastError(error: SpotifyGatewayError): void {
+		this.lastError = error;
 	}
 
 	private clearLastError(): void {
@@ -191,7 +188,7 @@ class SpotifyApiGateway {
 
 		const blockReason = this.shouldBlockProactive(options);
 		if (blockReason) {
-			this.setLastError(blockReason === "blocked" ? "server blocked" : blockReason);
+			this.setLastError(blockReason === "blocked" ? "blocked" : blockReason);
 			spotifyApiMetrics.record({
 				kind: blockReason === "quota" || blockReason === "daily" ? "skipped" : "blocked",
 				bucket,
@@ -268,7 +265,7 @@ class SpotifyApiGateway {
 
 		let token = await spotifyAuth.ensureAccessToken(settings);
 		if (!token) {
-			this.setLastError("no access token");
+			this.setLastError("no_access_token");
 			return null;
 		}
 
@@ -296,7 +293,7 @@ class SpotifyApiGateway {
 				);
 				token = await spotifyAuth.ensureAccessToken(settings, true);
 				if (!token) {
-					this.setLastError("no access token");
+					this.setLastError("no_access_token");
 					return null;
 				}
 				response = await doFetch(token);
@@ -321,7 +318,7 @@ class SpotifyApiGateway {
 				);
 				token = await spotifyAuth.ensureAccessToken(settings, true);
 				if (!token) {
-					this.setLastError("no access token");
+					this.setLastError("no_access_token");
 					return null;
 				}
 				response = await doFetch(token);
@@ -339,6 +336,7 @@ class SpotifyApiGateway {
 			}
 
 			if (response.status === 429) {
+				this.setLastError("rate_limited");
 				spotifyRateLimit.record429(url, response);
 				spotifyApiMetrics.record({
 					kind: "429",
@@ -354,6 +352,8 @@ class SpotifyApiGateway {
 
 			if (response.ok || response.status === 204) {
 				spotifyRateLimit.recordSuccess(url);
+			} else if (this.lastError === null) {
+				this.setLastError(response.status === 401 ? "no_access_token" : "unknown");
 			}
 
 			return response;
@@ -364,7 +364,13 @@ class SpotifyApiGateway {
 					: e instanceof Error
 						? e.message
 						: String(e);
-			this.setLastError(msg);
+			this.setLastError(
+				e instanceof Error && e.name === "AbortError"
+					? "timeout"
+					: msg.includes("fetch failed")
+						? "fetch_failed"
+						: "unknown"
+			);
 			streamDeck.logger.error(`[Spotify] request failed: ${url} ${msg}`);
 			return null;
 		}

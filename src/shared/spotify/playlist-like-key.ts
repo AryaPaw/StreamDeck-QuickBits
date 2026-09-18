@@ -1,3 +1,5 @@
+import type { LikeErrorBadge } from "./like-error";
+
 const HEART_PATH =
 	"M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12Z";
 
@@ -63,7 +65,16 @@ function wrapLabel(text: string, maxLen = 11, maxLines = 2): string[] {
 	return lines.length > 0 ? lines : ["Playlist"];
 }
 
-function heartMarkup(visual: PlaylistLikeVisual): string {
+function errorBadgeMarkup(badge: LikeErrorBadge): string {
+	const fontSize = badge === "!" ? 28 : badge.length > 3 ? 20 : 22;
+	return `<rect x="28" y="50" width="88" height="44" rx="12" fill="#c45c26"/><text x="72" y="80" text-anchor="middle" fill="#ffffff" font-size="${fontSize}" font-weight="700" font-family="Segoe UI, Arial, sans-serif">${escapeXml(badge)}</text>`;
+}
+
+function dimHeartMarkup(): string {
+	return `<g transform="translate(72,68) scale(3.55) translate(-12,-11.5)" opacity="0.35"><path fill="none" stroke="#9a9a9a" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" d="${HEART_PATH}"/></g>`;
+}
+
+function heartMarkup(visual: PlaylistLikeVisual, badge?: LikeErrorBadge): string {
 	const heart = `<g transform="translate(72,68) scale(3.55) translate(-12,-11.5)">`;
 	switch (visual) {
 		case "liked":
@@ -71,7 +82,7 @@ function heartMarkup(visual: PlaylistLikeVisual): string {
 		case "pending":
 			return `${heart}<path fill="none" stroke="#1DB954" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" d="${HEART_PATH}"/></g>`;
 		case "unavailable":
-			return `<g transform="translate(72,68) scale(3.55) translate(-12,-11.5)" opacity="0.35"><path fill="none" stroke="#9a9a9a" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" d="${HEART_PATH}"/></g><circle cx="102" cy="92" r="20" fill="#c45c26"/><path d="M102 81v16" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/><circle cx="102" cy="104" r="3.2" fill="#ffffff"/>`;
+			return `${dimHeartMarkup()}${errorBadgeMarkup(badge ?? "!")}`;
 		case "empty":
 			return `${heart}<path fill="none" stroke="#ececec" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" d="${HEART_PATH}"/></g>`;
 		default: {
@@ -91,16 +102,11 @@ function titleMarkup(lines: string[]): string {
 		.join("");
 }
 
-export function buildPlaylistLikeKeyImage(title: string, visual: PlaylistLikeVisual): string {
-	const lines = wrapLabel(title);
-	const cacheKey = `${visual}:${lines.join("\n")}`;
-	const cached = imageCache.get(cacheKey);
-	if (cached) {
-		return cached;
-	}
+function toDataUri(svg: string): string {
+	return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
 
-	const svg = `<svg width="144" height="144" xmlns="http://www.w3.org/2000/svg">${heartMarkup(visual)}${titleMarkup(lines)}</svg>`;
-	const image = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+function rememberImage(cacheKey: string, image: string): string {
 	imageCache.set(cacheKey, image);
 	if (imageCache.size > 80) {
 		const oldest = imageCache.keys().next().value;
@@ -109,4 +115,30 @@ export function buildPlaylistLikeKeyImage(title: string, visual: PlaylistLikeVis
 		}
 	}
 	return image;
+}
+
+export function buildPlaylistLikeKeyImage(
+	title: string,
+	visual: PlaylistLikeVisual,
+	badge?: LikeErrorBadge
+): string {
+	const lines = wrapLabel(title);
+	const cacheKey = `${visual}:${badge ?? ""}:${lines.join("\n")}`;
+	const cached = imageCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+
+	const svg = `<svg width="144" height="144" xmlns="http://www.w3.org/2000/svg">${heartMarkup(visual, badge)}${titleMarkup(lines)}</svg>`;
+	return rememberImage(cacheKey, toDataUri(svg));
+}
+
+export function buildLikeErrorKeyImage(badge: LikeErrorBadge): string {
+	const cacheKey = `like-error:${badge}`;
+	const cached = imageCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+	const svg = `<svg width="144" height="144" xmlns="http://www.w3.org/2000/svg">${dimHeartMarkup()}${errorBadgeMarkup(badge)}</svg>`;
+	return rememberImage(cacheKey, toDataUri(svg));
 }

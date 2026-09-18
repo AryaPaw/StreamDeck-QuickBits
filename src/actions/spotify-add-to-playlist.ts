@@ -18,6 +18,14 @@ import {
 import { hasGrantedScopes, PLAYLIST_REQUIRED_SCOPES } from "../shared/spotify/auth";
 import { spotifyApiGateway } from "../shared/spotify/api-gateway";
 import { buildPlaylistLikeKeyImage } from "../shared/spotify/playlist-like-key";
+import {
+	classifyGatewayFailure,
+	isGlobalLikeFailure,
+	likeApiStatusToBadge,
+	mergePlaylistLikeStatus,
+	shouldShowLikeErrorBadge
+} from "../shared/spotify/like-error";
+import type { SpotifyLikeApiStatus } from "../shared/spotify/types";
 
 export type SpotifyAddToPlaylistSettings = {
 	playlistId?: string;
@@ -36,6 +44,7 @@ type VisibleKey = {
 	inPlaylist: boolean;
 	known: boolean;
 	pending: boolean;
+	apiStatus: SpotifyLikeApiStatus;
 	renderSerial: number;
 };
 
@@ -54,6 +63,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			inPlaylist: false,
 			known: false,
 			pending: false,
+			apiStatus: "ok",
 			renderSerial: 0
 		});
 		if (!this.unsubscribe) {
@@ -100,6 +110,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			entry.known = false;
 			entry.inPlaylist = false;
 			entry.pending = false;
+			entry.apiStatus = "ok";
 		}
 
 		await this.renderKey(ev.action.id);
@@ -168,6 +179,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			if (!result.ok) {
 				if (entry) {
 					entry.inPlaylist = previous;
+					this.applyPlaylistFailure(entry);
 				}
 				if (spotifyApiGateway.getLastError() === "geo_blocked") {
 					streamDeck.logger.warn(
@@ -182,6 +194,7 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			if (entry) {
 				entry.inPlaylist = result.inPlaylist;
 				entry.known = true;
+				entry.apiStatus = "ok";
 			}
 			await this.renderKey(ev.action.id);
 		});
@@ -233,6 +246,8 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			!settings.refreshToken ||
 			(settings.oauthScopes && !hasGrantedScopes(settings.oauthScopes, PLAYLIST_REQUIRED_SCOPES))
 		) {
+			entry.apiStatus = "no_auth";
+			await this.renderKey(contextId);
 			return;
 		}
 
@@ -253,11 +268,13 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 			return;
 		}
 		if (inPlaylist === null) {
+			this.applyPlaylistFailure(latest);
 			await this.renderKey(contextId);
 			return;
 		}
 		latest.inPlaylist = inPlaylist;
 		latest.known = true;
+		latest.apiStatus = "ok";
 		await this.renderKey(contextId);
 	}
 
@@ -313,14 +330,12 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 		const settings = getSpotifySettings();
 		const state = spotifyState.getState();
 		const playlistId = entry.settings.playlistId?.trim();
+		const localStatus = !settings.refreshToken ? "no_auth" : entry.apiStatus;
+		const status = mergePlaylistLikeStatus(state.likeApiStatus, localStatus);
+		const badge = likeApiStatusToBadge(status);
+		const showError = shouldShowLikeErrorBadge(status, entry.known, entry.pending);
 
-		const unavailable =
-			!settings.refreshToken ||
-			state.likeApiStatus === "no_auth" ||
-			state.likeApiStatus === "geo_blocked" ||
-			(!entry.known &&
-				(state.likeApiStatus === "unavailable" || state.likeApiStatus === "rate_limited"));
-		const visual = unavailable
+		const visual = showError
 			? "unavailable"
 			: entry.pending
 				? "pending"
@@ -328,7 +343,17 @@ export class SpotifyAddToPlaylistAction extends SingletonAction<SpotifyAddToPlay
 					? "liked"
 					: "empty";
 
-		await entry.action.setImage(buildPlaylistLikeKeyImage(title, visual));
+		await entry.action.setImage(
+			buildPlaylistLikeKeyImage(title, visual, showError ? (badge ?? "!") : undefined)
+		);
+	}
+
+	private applyPlaylistFailure(entry: VisibleKey): void {
+		const status = classifyGatewayFailure(spotifyApiGateway.getLastError());
+		entry.apiStatus = status;
+		if (isGlobalLikeFailure(status)) {
+			spotifyState.markLikeApiFailure(status);
+		}
 	}
 
 	private async sendPlaylistsToPi(): Promise<void> {

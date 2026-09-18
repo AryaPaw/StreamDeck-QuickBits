@@ -61,6 +61,20 @@ Client ID/Secret stay in Stream Deck settings — not in git.
 
 Debug (localhost only): `http://127.0.0.1:5789/debug`
 
+If Like or Playlist Like cannot reach the Web API, the key shows a short badge on a dim heart (not a generic `!` unless the failure is unknown):
+
+| Badge | Meaning | What to do |
+|-------|---------|------------|
+| GEO | Track blocked in this country (`403` + unavailable in this country) | Change VPN/DNS/exit country, then wait for recovery |
+| 429 | Spotify rate limit / backoff | Wait; do not spam the key |
+| AUTH | No refresh/access token, or `invalid_grant` | Open Spotify Setup and authorize again |
+| 403 | Web API forbidden (not geo): missing rights or playlist Forbidden | Re-authorize in Setup and accept playlist scopes |
+| NET | Network timeout or fetch failed | Check internet, retry |
+| DAY | Plugin daily background API budget used and no like cache | Manual Like still works; wait until midnight |
+| ! | Unclassified failure (for example HTTP 5xx) | Check the plugin log for `[Spotify]` |
+
+GEO and AUTH stay on the key even if a cached heart is known. 429 and `!` show only when like/playlist membership is unknown. A playlist `403` does not paint Liked Songs if the library API is still healthy.
+
 ## 💡 Skydimo lighting
 
 Optional. Skip if you do not use Skydimo.

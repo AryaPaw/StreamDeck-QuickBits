@@ -34,7 +34,15 @@ export type SpotifyTrack = {
 	duration: number;
 };
 
-export type SpotifyLikeApiStatus = "ok" | "no_auth" | "rate_limited" | "unavailable" | "geo_blocked";
+export type SpotifyLikeApiStatus =
+	| "ok"
+	| "no_auth"
+	| "rate_limited"
+	| "unavailable"
+	| "geo_blocked"
+	| "forbidden"
+	| "net"
+	| "daily";
 
 export type PlaybackStateName = "playing" | "paused" | "stopped" | "unknown";
 
